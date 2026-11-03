@@ -1,0 +1,524 @@
+# 运动方案配置 (「运动方案」页). 由程序维护。
+# source 标注来源：旧工程实测导入 的值来自已现场验证的工程，
+# 不代表本工程现场已复核。
+schema_version: 1
+plans:
+  - plan_id: 初始位->拍照位
+    desc: ''
+    default_mode: movej
+    speed: 60
+    blend: 12
+    timeout: 100
+    source: 旧工程实测导入（RealMan_Robot/ECO65_NutTighten/configs/config.default.yaml）
+    waypoints:
+      - mode: movej
+        pos:
+          - 45.005
+          - 90.0
+          - -150.0
+          - 121.7
+          - 90.0
+          - 0.0
+      - mode: movej
+        pos:
+          - 45.004
+          - -81.499
+          - -127.519
+          - 119.02
+          - 90.002
+          - 0.0
+  - plan_id: 拍照位->初始位
+    desc: 本体行走时ROBOT姿态
+    default_mode: movej
+    speed: 60
+    blend: 12
+    timeout: 100
+    source: 旧工程实测导入（RealMan_Robot/ECO65_NutTighten/configs/config.default.yaml）
+    waypoints:
+      - mode: movej
+        pos:
+          - 45.0
+          - 90.002
+          - -150.004
+          - 121.698
+          - 90.0
+          - -0.002
+      - mode: movej
+        pos:
+          - -0.001
+          - 90.0
+          - -150.006
+          - 121.701
+          - 89.994
+          - -0.002
+  - plan_id: 任意位置->拍照位（动作前请确保套筒已离开螺栓）
+    desc: 从任意位置直接到达拍照位，此操作需谨慎，尤其注意螺母在套筒内时进制使用此路径
+    default_mode: movel
+    speed: 60
+    blend: 12
+    timeout: 100
+    source: 旧工程实测导入（RealMan_Robot/ECO65_NutTighten/configs/config.default.yaml）
+    waypoints:
+      - mode: movel
+        pos:
+          - -0.336669
+          - -0.059057000000000005
+          - -0.105645
+          - 0.0
+          - 0.0
+          - 0.001
+  - plan_id: 拍照位->取套筒一位_M16
+    desc: ''
+    default_mode: movel
+    speed: 100
+    blend: 12
+    timeout: 100
+    source: 旧工程实测导入（RealMan_Robot/ECO65_NutTighten/configs/config.default.yaml）
+    waypoints:
+      - mode: movej
+        pos:
+          - 90.0
+          - -100.354
+          - -77.621
+          - -1.95
+          - 90.337
+          - -90.631
+      - mode: movej
+        pos:
+          - 121.964
+          - -114.974
+          - -55.685
+          - -9.283
+          - 31.937
+          - -180.137
+      - mode: movej
+        pos:
+          - 123.156
+          - -100.351
+          - -77.629
+          - -1.95
+          - 33.112
+          - -180.126
+  - plan_id: 拍照位->取套筒二位_M20
+    desc: ''
+    default_mode: movej
+    speed: 100
+    blend: 12
+    timeout: 100
+    source: 旧工程实测导入（RealMan_Robot/ECO65_NutTighten/configs/config.default.yaml）
+    waypoints:
+      - mode: movej
+        pos:
+          - 90.006
+          - -100.353
+          - -77.621
+          - -1.947
+          - 90.34
+          - -90.631
+      - mode: movej
+        pos:
+          - 121.964
+          - -114.973
+          - -55.681
+          - -9.286
+          - 31.937
+          - -180.14
+      - mode: movej
+        pos:
+          - 123.27
+          - -114.566
+          - -58.999
+          - -6.374
+          - 33.239
+          - -180.134
+  - plan_id: 拍照位->取套筒三位_M24
+    desc: ''
+    default_mode: movej
+    speed: 100
+    blend: 12
+    timeout: 100
+    source: 旧工程实测导入（RealMan_Robot/ECO65_NutTighten/configs/config.default.yaml）
+    waypoints:
+      - mode: movej
+        pos:
+          - 90.004
+          - -100.35
+          - -77.625
+          - -1.947
+          - 90.34
+          - -90.631
+      - mode: movej
+        pos:
+          - 121.963
+          - -114.977
+          - -55.682
+          - -9.28
+          - 31.934
+          - -180.134
+      - mode: movej
+        pos:
+          - 123.73
+          - -133.225
+          - -29.748
+          - -16.96
+          - 33.706
+          - -180.131
+  - plan_id: 取套筒位->拍照位
+    desc: ''
+    default_mode: movej
+    speed: 100
+    blend: 12
+    timeout: 100
+    source: 旧工程实测导入（RealMan_Robot/ECO65_NutTighten/configs/config.default.yaml）
+    waypoints:
+      - mode: movej
+        pos:
+          - 121.964
+          - -114.973
+          - -55.682
+          - -9.28
+          - 31.929
+          - -180.14
+      - mode: movej
+        pos:
+          - 90.001
+          - -100.349
+          - -77.619
+          - -1.947
+          - 90.335
+          - -90.631
+      - mode: movel
+        pos:
+          - -0.336669
+          - -0.059057000000000005
+          - -0.105645
+          - 0.0
+          - 0.0
+          - 0.001
+  - plan_id: 套筒前进100
+    desc: ''
+    default_mode: movej
+    speed: 60
+    blend: 12
+    timeout: 100
+    source: 本工程新建
+    waypoints:
+      - mode: socket_offset
+        pos:
+          - 0.0
+          - 100.0
+          - 0.0
+          - 0.0
+          - 0.0
+          - 0.0
+  - plan_id: 套筒前进89
+    desc: ''
+    default_mode: movej
+    speed: 60
+    blend: 12
+    timeout: 100
+    source: 本工程新建
+    waypoints:
+      - mode: socket_offset
+        pos:
+          - 0.0
+          - 89.0
+          - 0.0
+          - 0.0
+          - 0.0
+          - 0.0
+  - plan_id: 套筒后退100
+    desc: ''
+    default_mode: movej
+    speed: 60
+    blend: 12
+    timeout: 100
+    source: 本工程新建
+    waypoints:
+      - mode: socket_offset
+        pos:
+          - 0.0
+          - -100.0
+          - 0.0
+          - 0.0
+          - 0.0
+          - 0.0
+  - plan_id: 套筒后退89
+    desc: ''
+    default_mode: movej
+    speed: 60
+    blend: 12
+    timeout: 100
+    source: 本工程新建
+    waypoints:
+      - mode: socket_offset
+        pos:
+          - 0.0
+          - -89.0
+          - 0.0
+          - 0.0
+          - 0.0
+          - 0.0
+  - plan_id: 套筒前进89上升3
+    desc: ''
+    default_mode: movej
+    speed: 10
+    blend: 12
+    timeout: 100
+    source: 本工程新建
+    waypoints:
+      - mode: movej
+        pos:
+          - 123.281
+          - -113.468
+          - -60.621
+          - -5.814
+          - 33.165
+          - -180.184
+      - mode: movej
+        pos:
+          - 133.151
+          - -114.73
+          - -73.189
+          - 7.989
+          - 43.036
+          - -180.159
+  - plan_id: 任意位-> 取套筒二
+    desc: ''
+    default_mode: movel
+    speed: 60
+    blend: 12
+    timeout: 100
+    source: 本工程新建
+    waypoints:
+      - mode: movel
+        pos:
+          - -0.06951399999999999
+          - -0.29799200000000003
+          - -0.29412299999999997
+          - 0.622
+          - 1.569
+          - -0.161
+  - plan_id: 测试方案
+    desc: ''
+    default_mode: movej
+    speed: 60
+    blend: 12
+    timeout: 100
+    source: 本工程新建
+    waypoints:
+      - mode: movej
+        pos:
+          - 45.001
+          - -94.064
+          - -114.77
+          - 118.874
+          - 90.008
+          - -0.071
+      - mode: movej
+        pos:
+          - 45.005
+          - -109.23
+          - -94.005
+          - 113.269
+          - 90.005
+          - -0.071
+paths:
+  - path_id: path_to_view
+    poses:
+      -   - 0.352925
+          - -0.05888
+          - 0.32732
+          - 3.141
+          - 0.0
+          - -1.57
+      -   - 0.152925
+          - -0.05888
+          - 0.32732
+          - 3.141
+          - 0.0
+          - -1.57
+    source: 旧工程实测导入（RealMan_Robot/ECO65_NutTighten/configs/config.default.yaml）
+  - path_id: path_to_bolt
+    poses:
+      -   - 0.152925
+          - -0.05888
+          - 0.32732
+          - 3.141
+          - 0.0
+          - -1.57
+      -   - 0.352925
+          - -0.05888
+          - 0.32732
+          - 3.141
+          - 0.0
+          - -1.57
+    source: 旧工程实测导入（RealMan_Robot/ECO65_NutTighten/configs/config.default.yaml）
+  - path_id: path_to_rack
+    poses:
+      -   - 0.352925
+          - -0.05888
+          - 0.32732
+          - 3.141
+          - 0.0
+          - -1.57
+      -   - 0.302925
+          - -0.15888
+          - 0.32732
+          - 3.141
+          - 0.0
+          - -1.57
+    source: 旧工程实测导入（RealMan_Robot/ECO65_NutTighten/configs/config.default.yaml）
+  - path_id: path_to_standoff
+    poses:
+      -   - 0.152925
+          - -0.05888
+          - 0.32732
+          - 3.141
+          - 0.0
+          - -1.57
+      -   - 0.352925
+          - -0.05888
+          - 0.32732
+          - 3.141
+          - 0.0
+          - -1.57
+    source: 旧工程实测导入（RealMan_Robot/ECO65_NutTighten/configs/config.default.yaml）
+  - path_id: path_to_rack_release
+    poses:
+      -   - 0.302925
+          - -0.15888
+          - 0.32732
+          - 3.141
+          - 0.0
+          - -1.57
+      -   - 0.352925
+          - -0.05888
+          - 0.32732
+          - 3.141
+          - 0.0
+          - -1.57
+    source: 旧工程实测导入（RealMan_Robot/ECO65_NutTighten/configs/config.default.yaml）
+  - path_id: path_home
+    poses:
+      -   - 0.352925
+          - -0.05888
+          - 0.32732
+          - 3.141
+          - 0.0
+          - -1.57
+      -   - 0.0
+          - 20.0
+          - 70.0
+          - 0.0
+          - -90.0
+          - 0.0
+    source: 旧工程实测导入（RealMan_Robot/ECO65_NutTighten/configs/config.default.yaml）
+sockets:
+  - code: '10'
+    size: M10
+    rack_station: 0
+    grip_pose:
+      - 0.302925
+      - -0.15888
+      - 0.32732
+      - 3.141
+      - 0.0
+      - -1.57
+    release_pose:
+      - 0.302925
+      - 0.05888
+      - 0.32732
+      - 3.141
+      - 0.0
+      - -1.57
+    source: 旧工程实测导入（RealMan_Robot/ECO65_NutTighten/configs/config.default.yaml）
+  - code: '12'
+    size: M12
+    rack_station: 1
+    grip_pose:
+      - 0.302925
+      - -0.15888
+      - 0.32732
+      - 3.141
+      - 0.0
+      - -1.57
+    release_pose:
+      - 0.302925
+      - 0.05888
+      - 0.32732
+      - 3.141
+      - 0.0
+      - -1.57
+    source: 旧工程实测导入（RealMan_Robot/ECO65_NutTighten/configs/config.default.yaml）
+  - code: '14'
+    size: M14
+    rack_station: 2
+    grip_pose:
+      - 0.302925
+      - -0.15888
+      - 0.32732
+      - 3.141
+      - 0.0
+      - -1.57
+    release_pose:
+      - 0.302925
+      - 0.05888
+      - 0.32732
+      - 3.141
+      - 0.0
+      - -1.57
+    source: 旧工程实测导入（RealMan_Robot/ECO65_NutTighten/configs/config.default.yaml）
+profile:
+  active_tool: Bolt
+  active_work: Ganta
+  speed_cap: 50
+  point_timeout_s: 30
+  guide_recv_timeout_s: 600
+  guide_detect_timeout_s: 60
+  guide_move_speed: 10
+  guide_move_blend: 0
+  global_speed: 35
+  safety:
+    collision: true
+    step_watchdog_s: 10
+    estop_io: 0
+    pause_poll_s: 0.05
+    require_reset_before_resume: true
+    preconditions:
+      require_grip_di: true
+      require_force_zero: true
+      require_climber_stowed: true
+    motion_limits:
+      max_linear_speed: 50
+      max_acc: 0
+      max_force_n: 30
+      joint_limits: []
+      workspace_box:
+        - -0.4
+        - 0.4
+        - -0.4
+        - 0.4
+        - 0.0
+        - 0.6
+    reduced_speed_zones: []
+    climber_arm_interlock: true
+    wind_interlock:
+      enabled: false
+      max_wind_speed: 10.0
+    remote_estop: true
+    fall_protection: true
+  insert:
+    creep_speed: 2.0
+    creep_step: 0.002
+    creep_max: 0.03
+    wrench_forward_s: 0.3
+    wrench_reverse_s: 0.3
+    seated_source: mainctrl
+  tighten:
+    use_force_control: false
+    hold_force_z: 15.0
+    retract_dist: 0.05
+    done_source: mainctrl
+    keep_socket: false
+  source: 旧工程实测导入（RealMan_Robot/ECO65_NutTighten/configs/config.default.yaml）

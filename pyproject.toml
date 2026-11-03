@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tower-ops"
+version = "0.1.0a0"
+description = "杆塔智能作业系统 - 内部离线骨架 (v0.5). 单主应用 + 独立 cp38 圆检测宿主."
+requires-python = ">=3.11,<3.13"  # ENV-MAIN 首选 3.12 (DEC-001), 3.11 兼容; 3.13+ 超出 C8 基线需另行确认
+dependencies = [
+    "pydantic>=2,<3",
+    "ruamel.yaml>=0.18",
+    "py_trees>=2.2",
+    "numpy>=1.26",
+    "pyserial>=3.5",   # 真实串口链路 (A21); SerialTransport 惰性导入, 离线不必须
+    "pyzmq>=25",       # S100 连通性探测 (E21) 与 V2 相机通道; 惰性导入, 离线不必须
+    "opencv-python>=4.9",  # 引导定位深度算法 (numpy/cv2); 见 DEC-011
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+# 其余设备/网络相关依赖按角色安装; 未选定依赖不进入主清单 (见 05 选型).
+ui = ["PySide6>=6.6"]
+
+[tool.setuptools]
+packages = { find = { include = ["application*", "edge_service*"] } }
+
+[tool.pytest.ini_options]
+testpaths = ["tests/offline"]
+norecursedirs = ["tests/hardware", "configs", ".venv"]
+# 不设 addopts 的 -q: 避免与命令行 -q 叠加成 -qq 而吞掉 "N passed" 汇总行(影响证据记录)

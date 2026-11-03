@@ -1,0 +1,439 @@
+# 视觉检测（命名保存，「视觉调试」页另存）。由程序维护。
+# 离线参数快照来自进程内 stub 流水线，不代表现场已复核。
+schema_version: 1
+detections:
+  - detection_id: 检测-d405_01
+    label: 检测-d405_01
+    camera_ref: d405_01
+    pipeline_ref: ds86_circle_pipeline
+    params:
+      pipeline:
+        pipeline_id: ds86_circle_pipeline
+        version: production-unconfirmed
+        host: opencv-linux
+        params:
+          output_type: 1轮廓图
+          circle_type: 最大圆
+          output_point: 是
+          min_radius: 0.0
+          max_radius: 999999.9
+          min_cover_ratio: 0.3
+          max_cover_ratio: 1.0
+          grad_thresh: 50.0
+          anchor_thresh: 8.0
+          min_path_len: 10.0
+          guass_sigma: 1.0
+          arc_fit_error: 1.0
+          circle_fit_error: 2.0
+          min_arc_points: 0
+          max_arc_points: 999999
+          circle_validation_pro: 0.1
+          resize_factor: 1.0
+          thread_num: 2
+          algorithm_version: detect_circle/legacy-port
+        decision:
+          expected_count_min: 1
+          expected_count_max: 10
+          radius_min_px: 0.0
+          radius_max_px: 1000000000.0
+          min_coverage: 0.0
+          min_depth_valid_ratio: 0.0
+      display_image_ops: {}
+      scheme:
+        schema_version: 1
+        source: depth
+        op_region: roi
+        roi:
+          - 216.0
+          - 99.0
+          - 614.0
+          - 397.0
+        polygon:
+          -   - 404.0
+              - 283.0
+          -   - 578.0
+              - 277.0
+          -   - 574.0
+              - 354.0
+          -   - 357.0
+              - 351.0
+          -   - 399.0
+              - 282.0
+        depth_params:
+          depth_min_mm: 300.0
+          depth_max_mm: 650.0
+          normalize_by_range: true
+          invalid_as_255: true
+          invalid_raw_threshold: 65535.0
+          thresh_method: binary_inv
+          thresh_value: 127.0
+          adaptive_block_size: 15
+          adaptive_c: 5.0
+          morph_op: close
+          morph_kernel_size: 3
+          min_contour_len: 0.0
+          max_contour_len: 1000000000.0
+          min_contour_area: 0.0
+          max_contour_area: 1000000000.0
+          min_bbox_w: 0.0
+          max_bbox_w: 1000000000.0
+          min_bbox_h: 0.0
+          max_bbox_h: 1000000000.0
+          min_aspect_ratio: 0.0
+          max_aspect_ratio: 1000000000.0
+          center_x_min: 0.0
+          center_x_max: 1000000000.0
+          center_y_min: 0.0
+          center_y_max: 1000000000.0
+          center_mode: bbox
+          rect_side_length: 100.0
+          avg_depth_enable: false
+          avg_depth_diameter: 20.0
+          depth_valid_min_mm: 1.0
+        seg_filter_mode: 所有轮廓
+        seg_filter_n: 2
+        prompt_k: 6
+        prompt_margin: 5.0
+        min_area: 1.0
+        label: ''
+        note: ''
+      circle_debug:
+        schema_version: 1
+        depth:
+          depth_min_mm: 110.0
+          depth_max_mm: 300.0
+          normalize_by_range: true
+          invalid_as_255: true
+          invalid_raw_threshold: 65535.0
+          thresh_method: binary_inv
+          thresh_value: 127.0
+          adaptive_block_size: 15
+          adaptive_c: 5.0
+          morph_op: none
+          morph_kernel_size: 5
+          min_contour_len: 0.0
+          max_contour_len: 1000000000.0
+          min_contour_area: 500.0
+          max_contour_area: 9999.0
+          min_bbox_w: 0.0
+          max_bbox_w: 1000000000.0
+          min_bbox_h: 0.0
+          max_bbox_h: 1000000000.0
+          min_aspect_ratio: 0.0
+          max_aspect_ratio: 1000000000.0
+          center_x_min: 0.0
+          center_x_max: 1000000000.0
+          center_y_min: 0.0
+          center_y_max: 1000000000.0
+          center_mode: bbox
+          rect_side_length: 200.0
+          avg_depth_enable: false
+          avg_depth_diameter: 20.0
+          depth_valid_min_mm: 1.0
+        circle:
+          output_type: 1轮廓图
+          circle_type: 最小圆
+          output_point: 是
+          min_radius: 5.0
+          max_radius: 500.0
+          min_cover_ratio: 0.3
+          max_cover_ratio: 1.0
+          grad_thresh: 50.0
+          anchor_thresh: 8.0
+          min_path_len: 10.0
+          guass_sigma: 1.0
+          arc_fit_error: 1.0
+          circle_fit_error: 2.0
+          min_arc_points: 0
+          max_arc_points: 999
+          circle_validation_pro: 0.1
+          resize_factor: 1.0
+          thread_num: 2
+          algorithm_version: detect_circle/legacy-port
+        stage: orig
+      active_tab: seg
+    params_hash: e0816c759cc6bfcedb13e03c10610d33d9cd7409035d3c75c23b53b90b09d5a7
+    source: 视觉调试页另存
+    note: ''
+  - detection_id: 检测-ds86_01
+    label: 检测-ds86_01
+    camera_ref: ds86_01
+    pipeline_ref: ds86_circle_pipeline
+    params:
+      pipeline:
+        pipeline_id: ds86_circle_pipeline
+        version: production-unconfirmed
+        host: opencv-linux
+        params:
+          output_type: 1轮廓图
+          circle_type: 最大圆
+          output_point: 是
+          min_radius: 0.0
+          max_radius: 999999.9
+          min_cover_ratio: 0.3
+          max_cover_ratio: 1.0
+          grad_thresh: 50.0
+          anchor_thresh: 8.0
+          min_path_len: 10.0
+          guass_sigma: 1.0
+          arc_fit_error: 1.0
+          circle_fit_error: 2.0
+          min_arc_points: 0
+          max_arc_points: 999999
+          circle_validation_pro: 0.1
+          resize_factor: 1.0
+          thread_num: 2
+          algorithm_version: detect_circle/legacy-port
+        decision:
+          expected_count_min: 1
+          expected_count_max: 10
+          radius_min_px: 0.0
+          radius_max_px: 1000000000.0
+          min_coverage: 0.0
+          min_depth_valid_ratio: 0.0
+      display_image_ops:
+        depth_seg_min_mm: 100
+        depth_seg_max_mm: 300
+      scheme:
+        schema_version: 1
+        source: color
+        op_region: whole
+        roi: null
+        polygon: []
+        depth_params:
+          depth_min_mm: 100.0
+          depth_max_mm: 300.0
+          normalize_by_range: true
+          invalid_as_255: true
+          invalid_raw_threshold: 65535.0
+          thresh_method: binary_inv
+          thresh_value: 127.0
+          adaptive_block_size: 15
+          adaptive_c: 5.0
+          morph_op: none
+          morph_kernel_size: 3
+          min_contour_len: 0.0
+          max_contour_len: 1000000000.0
+          min_contour_area: 0.0
+          max_contour_area: 1000000000.0
+          min_bbox_w: 0.0
+          max_bbox_w: 1000000000.0
+          min_bbox_h: 0.0
+          max_bbox_h: 1000000000.0
+          min_aspect_ratio: 0.0
+          max_aspect_ratio: 1000000000.0
+          center_x_min: 0.0
+          center_x_max: 1000000000.0
+          center_y_min: 0.0
+          center_y_max: 1000000000.0
+          center_mode: bbox
+          rect_side_length: 100.0
+          avg_depth_enable: false
+          avg_depth_diameter: 20.0
+          depth_valid_min_mm: 1.0
+        seg_filter_mode: 所有轮廓
+        seg_filter_n: 1
+        prompt_k: 3
+        prompt_margin: 5.0
+        min_area: 1.0
+        label: ''
+        note: ''
+      circle_debug:
+        schema_version: 1
+        depth:
+          depth_min_mm: 100.0
+          depth_max_mm: 300.0
+          normalize_by_range: true
+          invalid_as_255: true
+          invalid_raw_threshold: 65535.0
+          thresh_method: binary_inv
+          thresh_value: 127.0
+          adaptive_block_size: 15
+          adaptive_c: 5.0
+          morph_op: none
+          morph_kernel_size: 10
+          min_contour_len: 0.0
+          max_contour_len: 1000000000.0
+          min_contour_area: 500.0
+          max_contour_area: 9999.0
+          min_bbox_w: 0.0
+          max_bbox_w: 1000000000.0
+          min_bbox_h: 0.0
+          max_bbox_h: 1000000000.0
+          min_aspect_ratio: 0.0
+          max_aspect_ratio: 1000000000.0
+          center_x_min: 0.0
+          center_x_max: 1000000000.0
+          center_y_min: 0.0
+          center_y_max: 1000000000.0
+          center_mode: bbox
+          rect_side_length: 200.0
+          avg_depth_enable: false
+          avg_depth_diameter: 20.0
+          depth_valid_min_mm: 1.0
+        circle:
+          output_type: 1轮廓图
+          circle_type: 最大圆
+          output_point: 是
+          min_radius: 5.0
+          max_radius: 500.0
+          min_cover_ratio: 0.3
+          max_cover_ratio: 1.0
+          grad_thresh: 50.0
+          anchor_thresh: 8.0
+          min_path_len: 10.0
+          guass_sigma: 1.0
+          arc_fit_error: 1.0
+          circle_fit_error: 2.0
+          min_arc_points: 0
+          max_arc_points: 999
+          circle_validation_pro: 0.1
+          resize_factor: 1.0
+          thread_num: 2
+          algorithm_version: detect_circle/legacy-port
+        stage: orig
+      active_tab: circle
+    params_hash: b1016fe94c3e78935d329c7c8efd8180bf0a8d9373fb36780d97422dc7aec874
+    source: 视觉调试页另存
+    note: ''
+  - detection_id: 取螺栓定位
+    label: 取螺栓定位
+    camera_ref: ds86_01
+    pipeline_ref: ds86_circle_pipeline
+    params:
+      pipeline:
+        pipeline_id: ds86_circle_pipeline
+        version: production-unconfirmed
+        host: cp38-native
+        params:
+          output_type: 1轮廓图
+          circle_type: 最大圆
+          output_point: 是
+          min_radius: 0.0
+          max_radius: 999999.9
+          min_cover_ratio: 0.3
+          max_cover_ratio: 1.0
+          grad_thresh: 50.0
+          anchor_thresh: 8.0
+          min_path_len: 10.0
+          guass_sigma: 1.0
+          arc_fit_error: 1.0
+          circle_fit_error: 2.0
+          min_arc_points: 0
+          max_arc_points: 999999
+          circle_validation_pro: 0.1
+          resize_factor: 1.0
+          thread_num: 2
+          algorithm_version: detect_circle/legacy-port
+        decision:
+          expected_count_min: 1
+          expected_count_max: 10
+          radius_min_px: 0.0
+          radius_max_px: 1000000000.0
+          min_coverage: 0.0
+          min_depth_valid_ratio: 0.0
+      display_image_ops:
+        depth_seg_min_mm: 100
+        depth_seg_max_mm: 300
+      scheme:
+        schema_version: 1
+        source: color
+        op_region: whole
+        roi: null
+        polygon: []
+        depth_params:
+          depth_min_mm: 100.0
+          depth_max_mm: 300.0
+          normalize_by_range: true
+          invalid_as_255: true
+          invalid_raw_threshold: 65535.0
+          thresh_method: binary_inv
+          thresh_value: 127.0
+          adaptive_block_size: 15
+          adaptive_c: 5.0
+          morph_op: none
+          morph_kernel_size: 3
+          min_contour_len: 0.0
+          max_contour_len: 1000000000.0
+          min_contour_area: 0.0
+          max_contour_area: 1000000000.0
+          min_bbox_w: 0.0
+          max_bbox_w: 1000000000.0
+          min_bbox_h: 0.0
+          max_bbox_h: 1000000000.0
+          min_aspect_ratio: 0.0
+          max_aspect_ratio: 1000000000.0
+          center_x_min: 0.0
+          center_x_max: 1000000000.0
+          center_y_min: 0.0
+          center_y_max: 1000000000.0
+          center_mode: bbox
+          rect_side_length: 100.0
+          avg_depth_enable: false
+          avg_depth_diameter: 20.0
+          depth_valid_min_mm: 1.0
+        seg_filter_mode: 所有轮廓
+        seg_filter_n: 1
+        prompt_k: 3
+        prompt_margin: 5.0
+        min_area: 1.0
+        label: ''
+        note: ''
+      circle_debug:
+        schema_version: 1
+        depth:
+          depth_min_mm: 150.0
+          depth_max_mm: 300.0
+          normalize_by_range: true
+          invalid_as_255: true
+          invalid_raw_threshold: 65535.0
+          thresh_method: binary_inv
+          thresh_value: 127.0
+          adaptive_block_size: 15
+          adaptive_c: 5.0
+          morph_op: close
+          morph_kernel_size: 10
+          min_contour_len: 0.0
+          max_contour_len: 1000000000.0
+          min_contour_area: 200.0
+          max_contour_area: 9999.0
+          min_bbox_w: 0.0
+          max_bbox_w: 1000000000.0
+          min_bbox_h: 0.0
+          max_bbox_h: 1000000000.0
+          min_aspect_ratio: 0.0
+          max_aspect_ratio: 1000000000.0
+          center_x_min: 0.0
+          center_x_max: 1000000000.0
+          center_y_min: 0.0
+          center_y_max: 1000000000.0
+          center_mode: bbox
+          rect_side_length: 200.0
+          avg_depth_enable: false
+          avg_depth_diameter: 20.0
+          depth_valid_min_mm: 1.0
+        circle:
+          output_type: 1轮廓图
+          circle_type: 最小圆
+          output_point: 是
+          min_radius: 5.0
+          max_radius: 500.0
+          min_cover_ratio: 0.3
+          max_cover_ratio: 1.0
+          grad_thresh: 50.0
+          anchor_thresh: 8.0
+          min_path_len: 10.0
+          guass_sigma: 1.0
+          arc_fit_error: 1.0
+          circle_fit_error: 2.0
+          min_arc_points: 0
+          max_arc_points: 999999
+          circle_validation_pro: 0.1
+          resize_factor: 1.0
+          thread_num: 2
+          algorithm_version: detect_circle/legacy-port
+        stage: orig
+      active_tab: circle
+    params_hash: 7e28d9e48a305964fec636aa9d5639006df288cfabe58bc90b6ae2402e86e2c7
+    source: 视觉调试页另存
+    note: ''

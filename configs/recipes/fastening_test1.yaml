@@ -1,0 +1,211 @@
+# 执行方案草稿（E20「执行方案」页导出）。由程序按 schema 生成。
+# is_offline_draft=true 的草稿是离线示例，不得用于真实生产发布。
+schema_version: 2
+recipe_id: fastening_test1
+version: v1
+state: published
+sequence:
+  - id: capture_1
+    type: camera.capture
+    title: 粗定位抓拍
+    joint_target_ref: null
+    motion_plan_ref: null
+    camera_ref: ds86_01
+    input_from: null
+    pipeline_ref: null
+    detection_ref: null
+    guide_stages:
+      - coarse
+      - fine
+    guide_speed_pct: null
+    guide_max_offset_mm: 0.0
+    predicate: null
+    on_false: null
+    on_true: null
+    action_ref: null
+    method_ref: null
+    device_refs: []
+    params: {}
+    inputs: []
+    subflow_ref: null
+    device_ref: null
+    max_iterations: null
+    field_name: null
+    expected: null
+    stable_ticks: 1
+    deadline_ms: null
+    operator_options:
+      - 继续
+      - 终止
+    overrides: {}
+  - id: detect_1
+    type: vision.run
+    title: null
+    joint_target_ref: null
+    motion_plan_ref: null
+    camera_ref: null
+    input_from:
+      step: capture_1
+      output: frame
+    pipeline_ref: null
+    detection_ref: 检测-ds86_01
+    guide_stages:
+      - coarse
+      - fine
+    guide_speed_pct: null
+    guide_max_offset_mm: 0.0
+    predicate: null
+    on_false: null
+    on_true: null
+    action_ref: null
+    method_ref: null
+    device_refs: []
+    params: {}
+    inputs: []
+    subflow_ref: null
+    device_ref: null
+    max_iterations: null
+    field_name: null
+    expected: null
+    stable_ticks: 1
+    deadline_ms: null
+    operator_options:
+      - 继续
+      - 终止
+    overrides: {}
+  - id: guide_1
+    type: vision.guided_position
+    title: 粗定位
+    joint_target_ref: null
+    motion_plan_ref: null
+    camera_ref: ds86_01
+    input_from: null
+    pipeline_ref: null
+    detection_ref: null
+    guide_stages:
+      - coarse
+    guide_speed_pct: null
+    guide_max_offset_mm: 0.0
+    predicate: null
+    on_false: null
+    on_true: null
+    action_ref: null
+    method_ref: null
+    device_refs: []
+    params: {}
+    inputs: []
+    subflow_ref: null
+    device_ref: null
+    max_iterations: null
+    field_name: null
+    expected: null
+    stable_ticks: 1
+    deadline_ms: null
+    operator_options:
+      - 继续
+      - 终止
+    overrides: {}
+  - id: capture_2
+    type: camera.capture
+    title: 精定位抓拍
+    joint_target_ref: null
+    motion_plan_ref: null
+    camera_ref: ds86_01
+    input_from: null
+    pipeline_ref: null
+    detection_ref: null
+    guide_stages:
+      - coarse
+      - fine
+    guide_speed_pct: null
+    guide_max_offset_mm: 0.0
+    predicate: null
+    on_false: null
+    on_true: null
+    action_ref: null
+    method_ref: null
+    device_refs: []
+    params: {}
+    inputs: []
+    subflow_ref: null
+    device_ref: null
+    max_iterations: null
+    field_name: null
+    expected: null
+    stable_ticks: 1
+    deadline_ms: null
+    operator_options:
+      - 继续
+      - 终止
+    overrides: {}
+  - id: detect_2
+    type: vision.run
+    title: null
+    joint_target_ref: null
+    motion_plan_ref: null
+    camera_ref: null
+    input_from:
+      step: capture_2
+      output: frame
+    pipeline_ref: null
+    detection_ref: 检测-ds86_01
+    guide_stages:
+      - coarse
+      - fine
+    guide_speed_pct: null
+    guide_max_offset_mm: 0.0
+    predicate: null
+    on_false: null
+    on_true: null
+    action_ref: null
+    method_ref: null
+    device_refs: []
+    params: {}
+    inputs: []
+    subflow_ref: null
+    device_ref: null
+    max_iterations: null
+    field_name: null
+    expected: null
+    stable_ticks: 1
+    deadline_ms: null
+    operator_options:
+      - 继续
+      - 终止
+    overrides: {}
+  - id: guide_2
+    type: vision.guided_position
+    title: 精定位
+    joint_target_ref: null
+    motion_plan_ref: null
+    camera_ref: ds86_01
+    input_from: null
+    pipeline_ref: null
+    detection_ref: null
+    guide_stages:
+      - fine
+    guide_speed_pct: null
+    guide_max_offset_mm: 0.0
+    predicate: null
+    on_false: null
+    on_true: null
+    action_ref: null
+    method_ref: null
+    device_refs: []
+    params: {}
+    inputs: []
+    subflow_ref: null
+    device_ref: null
+    max_iterations: null
+    field_name: null
+    expected: null
+    stable_ticks: 1
+    deadline_ms: null
+    operator_options:
+      - 继续
+      - 终止
+    overrides: {}
+failure_policy: null
+allow_partial: false
+overrides: {}
+is_offline_draft: false

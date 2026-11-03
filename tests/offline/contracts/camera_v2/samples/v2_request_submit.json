@@ -1,0 +1,1 @@
+{"v": 2, "cmd": "submit", "request_id": "demo-0001", "client_id": "windows-main", "deadline_ms": 2000, "service_epoch": 7, "channel_epoch": {"cam1": 3}, "payload": {"cams": ["cam1"], "required_streams": ["color", "depth"], "allow_partial": true}}

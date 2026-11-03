@@ -1,0 +1,79 @@
+# 引导定位配置（DS86 深度引导）。由程序维护。
+# source 标注来源：旧工程实测导入 的值是现场调参结果，
+# 不代表本工程已重新调过参。
+schema_version: 1
+source: 旧工程实测导入（Ganta_Crtl_System/vision_monitor/config/camera_config.json 的 DS86 引导页）
+depth:
+  depth_min_mm: 200.0
+  depth_max_mm: 3000.0
+  normalize_by_range: true
+  invalid_as_255: true
+  invalid_raw_threshold: 65535.0
+  thresh_method: binary_inv
+  thresh_value: 127
+  adaptive_block_size: 15
+  adaptive_c: 5
+  morph_op: none
+  morph_kernel_size: 3
+  min_contour_len: 0
+  max_contour_len: 999999
+  min_contour_area: 0
+  max_contour_area: 9999999
+  min_bbox_w: 0
+  max_bbox_w: 99999
+  min_bbox_h: 0
+  max_bbox_h: 99999
+  min_aspect_ratio: 0.0
+  max_aspect_ratio: 100.0
+  center_x_min: 0
+  center_x_max: 99999
+  center_y_min: 0
+  center_y_max: 99999
+  center_mode: bbox
+  rect_side_length: 100
+  avg_depth_enable: true
+  avg_depth_diameter: 10.0
+  depth_valid_min_mm: 1.0
+offsets:
+  coarse:
+    x_axis: Z
+    x_sign: -1
+    y_axis: X
+    y_sign: -1
+  fine:
+    x_axis: Z
+    x_sign: -1
+    y_axis: X
+    y_sign: -1
+  tcp_x: 104.0
+  tcp_y: 0.0
+circle:
+  circle_type: 最小圆
+  min_radius: 5
+  max_radius: 500
+  min_cover_ratio: 0.3
+  grad_thresh: 50
+  circle_fit_error: 2.0
+  arc_fit_error: 1.0
+ds86:
+  ds86_fps: 5
+  ds86_work_mode: active
+  ds86_align_mode: depth_to_color
+  ds86_tof_resolution: 640x480
+  ds86_color_resolution: 1600x1200
+  ds86_tof_exposure_mode: manual
+  ds86_tof_exposure_time: 200
+  ds86_color_exposure_mode: auto
+  ds86_color_exposure_time: 15000
+  ds86_color_gain: 1.0
+  ds86_ir_gain: 20
+  ds86_hdr_enable: true
+  ds86_hdr_low_exposure_time: 80
+  ds86_hdr_high_exposure_time: 200
+  ds86_confidence_filter_enable: true
+  ds86_confidence_filter_threshold: 15
+  ds86_flying_pixel_filter_enable: true
+  ds86_flying_pixel_filter_threshold: 5
+  ds86_spatial_filter_enable: true
+  ds86_depth_map_min_mm: 100
+  ds86_depth_map_max_mm: 300

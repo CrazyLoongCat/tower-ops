@@ -1,0 +1,60 @@
+# =============================================================================
+# tower-ops .gitignore
+# =============================================================================
+# 原则：只忽略「生成物 / 运行期数据 / 本地环境」；源码、configs 种子、vendor 厂家
+# 依赖、packaging/*.spec、scripts、tests 都要进仓库（迁移只拷 tower-ops，见 DEC-078）。
+
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+.eggs/
+
+# ---------- 虚拟环境 / 本地环境 ----------
+.venv/
+venv/
+env/
+
+# ---------- PyInstaller 构建产物（DEC-016 / DEC-072 / DEC-111） ----------
+build/
+build_host/
+build_linux/
+build_linux_host/
+dist/
+dist_host/
+dist_linux/
+dist_linux_host/
+
+# ---------- 打包/发布产物 ----------
+tower-ops-bundle*.zip
+tower-ops-min-src.tar.gz
+tower-ops-min-src.tar.gz.sha256
+
+# ---------- 运行期数据（记录库 / 帧 / 日志 / 界面截图） ----------
+runtime/
+logs/
+*.log
+
+# ---------- 配置原子写产生的备份 ----------
+# 程序保存 devices/motion/recipes 等配置时保留 <文件>.bak；
+# 执行方案删除也会留下 .deleted-<时间戳>.bak。这些是现场备份，不进仓库。
+*.bak
+*.deleted-*.bak
+
+# ---------- 编辑器 / 操作系统 ----------
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---------- 临时文件 ----------
+*.tmp
+*.orig
+*.rej

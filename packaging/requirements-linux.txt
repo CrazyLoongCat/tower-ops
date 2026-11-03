@@ -1,0 +1,33 @@
+# Linux 构建依赖（Ubuntu 22.04 / 24.04，x86_64 或 ARM64）—— DEC-072/073/074
+#
+# 用法（在目标架构的 Ubuntu 上）：
+#   bash scripts/setup_linux_env.sh          # DEC-113：一键建 .venv 并安装本文件
+#   source .venv/bin/activate && bash scripts/build_linux.sh
+#   # 等价手工步骤：
+#   python3 -m venv .venv && source .venv/bin/activate
+#   pip install -r packaging/requirements-linux.txt
+#   bash scripts/build_linux.sh
+#
+# 注意：PyInstaller **不支持交叉编译** —— x86_64 上只能出 x86_64 包，ARM64 上只能出 ARM64 包。
+#   在 ARM 机器上跑 x86_64 包会报 "Exec format error"。
+#
+# PySide6 的 aarch64 轮子有 glibc 门槛（2026-10 核对 PyPI）：
+#   * PySide6 6.12 / 6.8 的 aarch64 轮子 = manylinux_2_39 → 只能 Ubuntu 24.04（glibc 2.39）
+#   * PySide6 6.6.3 的 aarch64 轮子 = manylinux_2_31 → Ubuntu 22.04（glibc 2.35）可用
+# 所以这里固定 6.6.3：x86_64 与 ARM64 的 Ubuntu 22.04 都能装；
+# 若目标是 Ubuntu 24.04，可改用 `PySide6>=6.8`（同架构安装即可）。
+# 项目要求 PySide6 >= 6.6。
+
+pydantic>=2,<3
+ruamel.yaml>=0.18
+py_trees>=2.2
+# numpy 固定在 2.x 以下：PySide6 6.6.x 的 shiboken6 等二进制是按 NumPy 1.x 编译的，
+# 装 NumPy 2.x 时导入会打印「A module that was compiled using NumPy 1.x cannot be run
+# in NumPy 2.x」并有崩溃风险（DEC-076）。
+numpy>=1.26,<2
+pyserial>=3.5
+pyzmq>=25
+opencv-python-headless>=4.9
+onnxruntime
+PySide6==6.6.3
+pyinstaller>=6.0

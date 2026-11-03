@@ -1,0 +1,25 @@
+# 边缘侧（S100）相机通道配置 — E07
+# **现场值未确认**：serial 留空表示待现场用 `rs-enumerate-devices` 填入；
+# 序列号必须唯一（重复会被 CameraRegistry 拒绝绑定）。
+# 端口/监听地址由部署确认，见 doc/部署/S100访问边界与密钥管理.md（此处仅为示例，非已确认值）。
+schema_version: 1
+
+service:
+  port: 5555              # 部署值，需现场确认并放行
+  max_pending_jobs: 16
+  result_ttl_ms: 60000
+  dedup_ttl_ms: 30000
+
+channels:
+  - channel_id: cam1
+    serial: ""            # TODO 现场填：第一台 D405 序列号
+    width: 848
+    height: 480
+    alignment: true
+    enabled: true
+  - channel_id: cam2
+    serial: ""            # TODO 现场填：第二台 D405 序列号
+    width: 848
+    height: 480
+    alignment: true
+    enabled: true

@@ -1,0 +1,40 @@
+# E13 扩展示例配方草稿 —— 子流程/有限循环/等待/人工确认
+# is_offline_draft: true —— 未确认现场工艺/动作/阈值, 仅用于离线验证, 不得用于真实生产发布.
+schema_version: 1
+recipe_id: ds86_two_station_with_loop
+version: 0.1-draft
+state: draft
+is_offline_draft: true
+stations:
+  - {station_id: station_01, joint_target_ref: joint_station_01}
+  - {station_id: station_02, joint_target_ref: joint_station_02}
+required_cameras: [ds86_01]
+allow_partial: false
+sequence:
+  - {id: move, type: robot.move_joint, target_from: {station_field: joint_target_ref}}
+  # 等待设备状态在持续窗内保持 (E13: 新鲜 + 连续 tick)
+  - id: wait_ready
+    type: wait.state
+    device_ref: eco65_01
+    field_name: state
+    expected: READY
+    stable_ticks: 2
+    deadline_ms: 5000
+  - {id: capture, type: camera.capture, camera_ref: ds86_01}
+  - {id: detect, type: vision.run, input_from: {step: capture, output: frame}, pipeline_ref: approved_ds86_circle_pipeline}
+  - id: gate
+    type: condition
+    predicate: {source: {step: detect, field: status}, op: eq, value: PASS}
+    on_false: {policy: pause_for_review}
+  # 有界循环: 复用子流程模板做多次采样 (max_iterations 必须有界)
+  - id: resample
+    type: repeat
+    subflow_ref: capture_and_detect
+    max_iterations: 2
+  # 人工确认 (留证, 不绕过硬互锁)
+  - id: confirm
+    type: operator.confirm
+    inputs: [detect]
+    operator_options: ["继续", "终止"]
+  - {id: mechanism, type: mechanism.action, action_ref: approved_single_board_action}
+  - {id: evidence, type: record.evidence, inputs: [capture, detect, mechanism]}

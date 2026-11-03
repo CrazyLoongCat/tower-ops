@@ -1,0 +1,21 @@
+# 离线固件 profile 草稿 (A21/A24)
+# confirmed: false —— 未获 ICD/抓包金样本确认, 不得用于真实生产收发.
+# 仅描述字段位置, 不代表真实固件布局已经确定.
+profile_version: "offline-draft-v0"
+confirmed: false
+is_fake: true
+sof: "AA55"
+address_offset: 2
+address_len: 1
+type_offset: 3
+type_len: 1
+command_id_offset: 4
+command_id_len: 2
+command_id_byteorder: "little"
+length_offset: 6
+length_len: 1
+payload_offset: 7
+crc_len: 2
+crc_byteorder: "little"
+max_frame_bytes: 260
+notes: "占位草稿; 待 INPUT-FW 提供真实 ICD/金样本后再冻结"

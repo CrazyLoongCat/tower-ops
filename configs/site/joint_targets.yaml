@@ -1,0 +1,59 @@
+# 已确认示教点（E01 / INPUT-PATH）
+#
+# ⚠ 本文件里的数值**必须由现场用示教器实际取得并核对**，不得由 AI 或示例填充。
+#   未标 confirmed: true 的条目会被忽略；没有条目的后果是——
+#   **关节目标为空 -> 运动类配方不会被放行**（这是设计行为，不是没做完）。
+#
+# 读取方：main.py real 模式（--targets 可换路径）；解析见
+#   application/bootstrap/production.py:load_confirmed_targets
+#
+# 填写方式：取消注释并把现场示教值填进去。joint_deg 必须**恰好 6 项**（deg），
+# 不补 0、不缩位；waypoint_ref 写现场可追溯的标识（如示教日期+操作者）。
+#
+# targets:
+#   - station_id: station_01          # 与配方里的 station_id / joint_target_ref 对应
+#     joint_deg: [___, ___, ___, ___, ___, ___]
+#     waypoint_ref: taught_2026____     # 现场示教标识（不要写 offline/placeholder）
+#     confirmed: true                   # 现场核对后才置 true
+#     taught_by: ___                    # 示教人
+#     taught_at: 2026-__-__             # 示教日期
+#
+# 参考：doc/实施记录/基线与授权.md §2（D1 授权）、doc/实施规格/扩展能力与验证范围.md
+
+targets:
+- target_id: 拍照点
+  joint_deg:
+  - 45.00199890136719
+  - -85.59700012207031
+  - -124.01000213623047
+  - 119.64099884033203
+  - 90.0
+  - -0.07400000095367432
+  waypoint_ref: taught_20261026_110610
+  confirmed: true
+  taught_at: '2026-10-26T03:06:10+00:00'
+  source: 运动方案页-读取当前关节
+- target_id: 初始点
+  joint_deg:
+  - -0.0010000000474974513
+  - 90.00199890136719
+  - -150.00799560546875
+  - 121.7030029296875
+  - 89.99400329589844
+  - -0.004999999888241291
+  waypoint_ref: taught_20261026_110654
+  confirmed: true
+  taught_at: '2026-10-26T03:06:54+00:00'
+  source: 运动方案页-读取当前关节
+- target_id: 套筒二点
+  joint_deg:
+  - 123.26699829101562
+  - -114.56900024414062
+  - -58.99700164794922
+  - -6.372000217437744
+  - 33.24100112915039
+  - -180.13099670410156
+  waypoint_ref: taught_20261026_110823
+  confirmed: true
+  taught_at: '2026-10-26T03:08:23+00:00'
+  source: 运动方案页-读取当前关节

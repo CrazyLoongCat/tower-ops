@@ -1,0 +1,26 @@
+# 设备/链路绑定草稿 (A24). 未确认现场值, 仅离线装配参考.
+# 4 逻辑板 != 4 物理链路; 这里示例为 1 条链路承载 1 板 (最小闭环).
+links:
+  - link_id: link0
+    transport_kind: serial
+    port: COM_UNCONFIRMED
+    baudrate: 115200
+    data_bits: 8
+    parity: N
+    stop_bits: 1
+    duplex: half
+    confirmed: false
+boards:
+  - board_id: stm32_01
+    link_id: link0
+    address: 1
+    firmware_profile: offline-draft-v0
+    confirmed: false
+cameras:
+  - camera_id: ds86_01
+    service_id: local
+    channel_id: ds86_01
+    serial: UNCONFIRMED
+    capture_profile: default
+    calibration_id: ds86_handeye_unconfirmed
+    confirmed: false
