@@ -30,6 +30,7 @@ from application.services.guidance_config import GuidanceConfigStore
 from application.services.guidance_service import GuidanceService
 from application.services.motion_config import MotionConfigStore
 from application.services.motion_runner import MotionRunner
+from application.services.operation_config import OperationConfigStore
 from application.services.vision_detections import VisionDetectionStore
 from application.contracts.targets import JointTarget
 from application.domain.actions import ActionCatalog, ActionDefinition, ParamSpec
@@ -175,6 +176,8 @@ class AppStack:
     motion: MotionRunner
     # 命名视觉检测（「视觉调试」页另存，供配方 vision.run 引用）
     vision_detections: Any = None
+    # 操作台「杆塔宽度 / 螺栓直径」计算配置（DEC-148）
+    operation_config: Any = None
     # 示教点登记（DEC-067；仅 production 装配，离线为 None）
     teach_points: Any = None
     # 装配期不可用的设备（**不致命**: 界面照常起, 该设备标为不可用）
@@ -242,6 +245,7 @@ def build_offline_stack(
     motion_config_path: str | None = None,
     guidance_config_path: str | None = None,
     vision_detections_path: str | None = None,
+    operation_config_path: str | None = None,
 ) -> AppStack:
     """装配离线栈. 不打开真实串口/SDK/相机; 不自动执行任何运动."""
     os.makedirs(runtime_dir, exist_ok=True)
@@ -373,6 +377,10 @@ def build_offline_stack(
     # 供配方 vision.run 步骤引用（`detection_ref`）。
     vision_detections = VisionDetectionStore(
         vision_detections_path or os.path.join(runtime_dir, "detections.yaml"))
+    operation_config = OperationConfigStore(
+        operation_config_path or os.path.join(runtime_dir, "manual_ops.yaml"))
+    operation_config.load()
+    executor.operation_config = operation_config   # DEC-155：按螺栓直径选路点
     vision_detections.load()
     # 供 vision.run 步骤解析检测里保存的「运行一次方案」；离线档位下智能分割不可用时
     # 用占位后端跑通流程（结果里如实标注「非真实模型」）。
@@ -465,6 +473,7 @@ def build_offline_stack(
         camera_registry=camera_registry,
         motion_config=motion_config, motion=motion,
         vision_detections=vision_detections,
+        operation_config=operation_config,
         startup_notices=startup_notices,
         logging=logging_facility,
         runtime_dir=runtime_dir,

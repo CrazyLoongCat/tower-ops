@@ -107,6 +107,18 @@ def probe(entry: Any, *, timeout: float = DEFAULT_TIMEOUT,
 
 
 def _dispatch(entry: Any, protocol: str, target: str, timeout: float) -> ProbeResult:
+    if protocol == DeviceProtocol.REALSENSE_USB.value:
+        serial = str(getattr(entry, "serial", "") or "").strip()
+        if not getattr(entry, "confirmed", False) or is_placeholder(serial):
+            return ProbeResult(False, "D405 USB 尚未确认绑定序列号", protocol=protocol, target=target)
+        from application.services.device_scan import scan_d405_usb
+        result = scan_d405_usb()
+        if result.error:
+            return ProbeResult(False, result.error, protocol=protocol, target=target)
+        found = any(d.serial == serial for d in result.devices)
+        return ProbeResult(found, (f"已发现绑定的 D405 {serial}；尚未验证抓拍" if found
+                                   else f"未发现绑定的 D405 {serial}"),
+                           protocol=protocol, target=target, is_real=True)
     if protocol in SERIAL_PROTOCOLS:
         return probe_serial(getattr(entry, "serial_port", ""),
                             baudrate=int(getattr(entry, "baudrate", 115200) or 115200),

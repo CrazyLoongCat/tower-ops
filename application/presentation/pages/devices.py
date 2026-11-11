@@ -35,6 +35,7 @@ from application.services.device_scan import (
     ScanOutcome,
     format_network_diagnosis,
     scan_ds86_cameras,
+    scan_d405_usb,
 )
 from application.services.device_state import (
     TONE_DANGER,
@@ -199,7 +200,7 @@ if GUI_REQUIRED:
             self._kind_combo: QComboBox | None = None
             self._groups: dict[str, QGroupBox] = {}
             # 扫描设备的三个可注入点（默认走真实实现；离线测试注入假件）
-            self._scanner = scanner or scan_ds86_cameras
+            self._scanner = scanner
             self._selector = selector or _select_device
             self._notifier = notifier or _notify
             self.btn_scan: QPushButton | None = None
@@ -260,6 +261,12 @@ if GUI_REQUIRED:
                 self._proto_combo.currentIndexChanged.connect(self._sync)
             if self._kind_combo is not None:
                 self._kind_combo.currentIndexChanged.connect(self._sync)
+            if _is_camera_spec(spec):
+                def reset_usb_confirmation(*_args):
+                    if self._proto_combo.currentData() == DeviceProtocol.REALSENSE_USB.value:
+                        self._widgets["confirmed"].setChecked(False)
+                self._proto_combo.currentIndexChanged.connect(reset_usb_confirmation)
+                self._widgets["serial"].textChanged.connect(reset_usb_confirmation)
             self._sync()
 
         def _kind(self) -> str:
@@ -321,19 +328,28 @@ if GUI_REQUIRED:
             if "board" in self._groups:
                 self._groups["board"].setVisible(self._kind() == "board")
             local = protocol in LOCAL_PROTOCOLS
+            usb = protocol == DeviceProtocol.REALSENSE_USB.value
             self.result_label.setText(
-                "本地 SDK 直连：无需测试；启动时按配置的序列号/IP 打开"
+                ("D405 USB：扫描并确认序列号，抓拍时按绑定打开" if usb else
+                 "本地 SDK 直连：无需测试；启动时按配置的序列号/IP 打开")
                 if local else "未测试")
             self.result_label.setStyleSheet(
                 f"color:{THEME.text_disabled};" if local else "")
             btn = getattr(self, "btn_test", None)
             if btn is not None:
-                btn.setToolTip("本地 SDK 直连：没有网络参数可测，无需测试"
+                btn.setToolTip("只枚举已绑定的 D405，不启动采集" if usb else
+                               "本地 SDK 直连：没有网络参数可测，无需测试"
                                if local else "")
             scan_btn = getattr(self, "btn_scan", None)
             if scan_btn is not None:
                 # 只有走厂家 SDK 的相机才谈得上"扫描设备"（网络相机没有可扫的东西）。
                 scan_btn.setVisible(local)
+                usb = protocol == DeviceProtocol.REALSENSE_USB.value
+                scan_btn.setToolTip("扫描本机 USB D405 并选择序列号；扫描不启动采集" if usb
+                                    else "扫描 DS86 并选择序列号；扫描不启动采集")
+            host = self._widgets.get("host")
+            if host is not None:
+                host.setEnabled(protocol != DeviceProtocol.REALSENSE_USB.value)
 
         # ---------- 扫描设备（照旧程序：扫描 + 选择取序列号） ----------
         def _scan_devices(self) -> None:
@@ -343,7 +359,9 @@ if GUI_REQUIRED:
                 btn.setEnabled(False)
                 btn.setText("扫描中…")
             try:
-                outcome = self._scanner(scan_ms=SCAN_MS_PICK)
+                usb = self._proto_combo.currentData() == DeviceProtocol.REALSENSE_USB.value
+                scanner = self._scanner or (scan_d405_usb if usb else scan_ds86_cameras)
+                outcome = scanner(scan_ms=SCAN_MS_PICK)
             except Exception as exc:  # noqa: BLE001 - 扫描出意外也要如实说
                 outcome = ScanOutcome(
                     error=f"扫描 DS86 失败: {type(exc).__name__}: {exc}")
@@ -355,11 +373,16 @@ if GUI_REQUIRED:
 
         def _apply_scan(self, outcome) -> None:
             """讲清楚三种结果：扫不了 / 0 台 / 有设备但挑不了 —— 不拿一种冒充另一种。"""
+            usb = self._proto_combo.currentData() == DeviceProtocol.REALSENSE_USB.value
+            help_text = "请检查 D405 USB 连接、供电及 pyrealsense2。扫描不启动采集。" if usb else SCAN_HELP
             if outcome.error:
                 self._notifier(self, "扫描设备",
-                               f"{outcome.error}\n\n{SCAN_HELP}", True)
+                               f"{outcome.error}\n\n{help_text}", True)
                 return
             if not outcome.devices:
+                if usb:
+                    self._notifier(self, "扫描设备", f"未发现 D405 USB 相机。\n\n{help_text}", False)
+                    return
                 host_widget = self._widgets.get("host")
                 configured_ip = (host_widget.text().strip()
                                  if host_widget is not None else "")

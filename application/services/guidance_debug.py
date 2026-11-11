@@ -20,8 +20,10 @@
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+import numpy as np
 
 from application.algorithms.circle.params import CircleParams
 from application.algorithms.guidance.depth_guidance import (
@@ -33,6 +35,7 @@ from application.algorithms.guidance.offsets import OffsetParams, compute_robot_
 from application.algorithms.guidance.pixel_ops import compute_pixel_xyz
 from application.services.guidance_service import (
     CircleHit,
+    circle_diameter_mm,
     extract_circles,
     intrinsics_to_dict,
 )
@@ -60,6 +63,8 @@ class DepthStageResult:
     rects: List[dict] = field(default_factory=list)
     contours: List[Any] = field(default_factory=list)
     n_contours: int = 0
+    # DEC-133：自动深度范围解析结果（manual 模式为 None）
+    auto_range: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -80,6 +85,8 @@ class CircleDebugResult:
     used_depth_mm: float = 0.0
     coarse: Optional[Tuple[float, float]] = None
     fine: Optional[Tuple[float, float]] = None
+    # DEC-133：自动深度范围解析结果（manual 模式为 None）
+    auto_range: Optional[Dict[str, Any]] = None
 
 
 def _frame_depth(frame: Any) -> Tuple[Any, Any]:
@@ -108,7 +115,8 @@ def depth_guidance_stage(frame: Any,
                "contour_image", "debug_image")}
     return DepthStageResult(stages=stages, rects=list(res.get("rects") or []),
                             contours=list(res.get("contours") or []),
-                            n_contours=int(res.get("n_contours", 0)))
+                            n_contours=int(res.get("n_contours", 0)),
+                            auto_range=res.get("auto_range"))
 
 
 def find_circles_in_rects(image: Any, rects: Sequence[dict],
@@ -128,22 +136,67 @@ def find_circles_in_rects(image: Any, rects: Sequence[dict],
     if image is None:
         raise ValueError("没有可用于找圆的图像（该帧无彩色且无轮廓图）")
 
-    hits: List[CircleHit] = []
     errors: List[str] = []
+    valid: list[tuple[int, dict, int, int, int, int]] = []
     for i, rect in enumerate(rects):
         x1, y1 = int(rect["x1"]), int(rect["y1"])
         w, h = int(rect["x2"]) - x1, int(rect["y2"]) - y1
         if w < 5 or h < 5:
             errors.append(f"矩形#{i} ({x1},{y1}) 边长 {w}x{h} < 5px，跳过找圆")
             continue
-        algo_rect = [2, x1, y1, w, h, 0]
+        valid.append((i, rect, x1, y1, w, h))
+    if not valid:
+        return [], errors
+
+    # DEC-135：**一次**请求把所有矩形交给宿主。原实现每个矩形发一次 IPC 且每次都
+    # 重新编码整幅彩色图（1600×1200 RGB ≈5.8MB），矩形多时通信/编码占大头。
+    algo_rects = [[2, x1, y1, w, h, 0] for (_i, _r, x1, y1, w, h) in valid]
+    try:
+        ret = host_proxy.detect([image], algo_rects, params)
+    except Exception as exc:  # noqa: BLE001 - 整体失败退回逐矩形（保持旧行为/错误粒度）
+        errors.append(f"整批找圆失败，退回逐矩形：{exc}")
+        return _find_circles_per_rect(image, rects, params, host_proxy, errors)
+
+    hits: List[CircleHit] = []
+    for c in extract_circles(ret or {}):
+        idx = _rect_index_for_circle(float(c["cx"]), float(c["cy"]), valid)
+        hits.append(CircleHit(rect_index=idx, cx=float(c["cx"]),
+                              cy=float(c["cy"]), radius=float(c["radius"])))
+    return hits, errors
+
+
+def _rect_index_for_circle(cx: float, cy: float, valid) -> int:
+    """批量结果没有逐矩形分组：按圆心落在哪个矩形里归属（都不在取最近的矩形中心）。"""
+    best_idx = int(valid[0][1].get("idx", valid[0][0]))
+    best_dist = None
+    for idx, rect, x1, y1, w, h in valid:
+        key = int(rect.get("idx", idx))
+        if x1 <= cx <= x1 + w and y1 <= cy <= y1 + h:
+            return key
+        rx, ry = x1 + w / 2.0, y1 + h / 2.0
+        d = (cx - rx) ** 2 + (cy - ry) ** 2
+        if best_dist is None or d < best_dist:
+            best_dist, best_idx = d, key
+    return best_idx
+
+
+def _find_circles_per_rect(image: Any, rects: Sequence[dict],
+                           params: CircleParams, host_proxy: Any,
+                           errors: List[str]
+                           ) -> Tuple[List[CircleHit], List[str]]:
+    """旧路径（逐矩形一次请求）：批量失败时兜底，保持旧行为与错误粒度。"""
+    hits: List[CircleHit] = []
+    for i, rect in enumerate(rects):
+        x1, y1 = int(rect["x1"]), int(rect["y1"])
+        w, h = int(rect["x2"]) - x1, int(rect["y2"]) - y1
+        if w < 5 or h < 5:
+            continue
         try:
-            ret = host_proxy.detect([image], [algo_rect], params)
+            ret = host_proxy.detect([image], [[2, x1, y1, w, h, 0]], params)
         except Exception as exc:  # noqa: BLE001 - 单矩形失败不影响其它
             errors.append(f"矩形#{i} ({x1},{y1}) 找圆异常：{exc}")
             continue
-        found = extract_circles(ret or {})
-        for c in found:
+        for c in extract_circles(ret or {}):
             hits.append(CircleHit(rect_index=int(rect.get("idx", i)),
                                   cx=float(c["cx"]), cy=float(c["cy"]),
                                   radius=float(c["radius"])))
@@ -173,6 +226,29 @@ def circle_xyz(frame: Any, hit: CircleHit, depth_mm: Any,
     return (fallback[0], fallback[1], fallback[2]), float(fallback[2])
 
 
+def _depth_range_hint(frame: Any, params: DepthGuidanceParams) -> str:
+    """无候选轮廓时给出本帧有效深度区间，帮用户把切分上下限调回目标上（DEC-131）。
+
+    典型误配：载入新帧后参数回到默认 200–3000mm，而场景目标都在 200mm 以内，
+    切分范围外全部按背景处理 → 二值图全黑、轮廓为 0。这里把真实有效深度
+    （P5~P95）如实报出来，提示下限应 ≤ 目标最近深度。
+    """
+    try:
+        depth, scale = _frame_depth(frame)
+        if depth is None:
+            return ""
+        valid = depth[(depth > 0) & (depth < float(params.invalid_raw_threshold))]
+        if valid.size == 0:
+            return "；本帧没有有效深度像素（0/65535 之外为空）"
+        p5, p95 = np.percentile(valid, [5, 95])
+        k = float(scale) * 1000.0
+        return (f"；本帧有效深度 P5–P95 ≈ {p5 * k:.0f}–{p95 * k:.0f} mm，"
+                f"当前切分 {params.depth_min_mm:g}–{params.depth_max_mm:g} mm；"
+                f"深度下限需 ≤ 目标最近深度（可点击深度图直接读该点深度）")
+    except Exception:  # noqa: BLE001 - 提示失败不影响主流程
+        return ""
+
+
 def run_circle_debug(frame: Any, *,
                      depth_params: DepthGuidanceParams,
                      circle_params: CircleParams,
@@ -191,10 +267,12 @@ def run_circle_debug(frame: Any, *,
     result = CircleDebugResult(
         ok=False, stage="depth",
         stages=depth_stage.stages, rects=depth_stage.rects,
-        contours=depth_stage.contours, n_contours=depth_stage.n_contours)
+        contours=depth_stage.contours, n_contours=depth_stage.n_contours,
+        auto_range=depth_stage.auto_range)
     if not depth_stage.rects:
         result.message = (f"未找到候选目标（过滤后轮廓数={depth_stage.n_contours}）；"
-                          f"检查深度的切分上下限 / 二值化 / 形态学 / 轮廓过滤等参数")
+                          f"检查深度的切分上下限 / 二值化 / 形态学 / 轮廓过滤等参数"
+                          + _depth_range_hint(frame, depth_params))
         return result
     if only_depth:
         result.ok = True
@@ -212,6 +290,18 @@ def run_circle_debug(frame: Any, *,
         result.stage = "circle"
         result.message = f"找圆不可用：{exc}"
         return result
+    # DEC-147：每个圆的物理直径（圆心处所用深度 × 像素半径 / √(fx·fy)）。
+    # CircleHit 是 frozen dataclass：用 replace 生成新实例，不能原地赋值。
+    depth_mm_stage = depth_stage.stages.get("depth_mm")
+    _intr = getattr(frame, "intrinsics", None)
+    if depth_mm_stage is not None and _intr is not None:
+        intr_dict = intrinsics_to_dict(_intr)
+        enriched = []
+        for _h in hits:
+            _xyz, _used = circle_xyz(frame, _h, depth_mm_stage, depth_params)
+            enriched.append(replace(
+                _h, diameter_mm=circle_diameter_mm(_h.radius, _used, intr_dict)))
+        hits = enriched
     result.hits = hits
     result.rect_errors = errors
     if not hits:

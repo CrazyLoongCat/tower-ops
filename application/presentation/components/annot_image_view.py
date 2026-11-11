@@ -25,11 +25,12 @@ try:  # pragma: no cover
     from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, Signal
     from PySide6.QtGui import (QBrush, QColor, QFont, QPainter, QPainterPath,
                                QPen, QPixmap, QPolygonF)
-    from PySide6.QtWidgets import (QGraphicsEllipseItem, QGraphicsLineItem,
-                                   QGraphicsPathItem, QGraphicsPixmapItem,
-                                   QGraphicsPolygonItem, QGraphicsRectItem,
-                                   QGraphicsScene, QGraphicsTextItem,
-                                   QGraphicsView, QVBoxLayout, QWidget)
+    from PySide6.QtWidgets import (QGraphicsEllipseItem, QGraphicsItem,
+                                   QGraphicsLineItem, QGraphicsPathItem,
+                                   QGraphicsPixmapItem, QGraphicsPolygonItem,
+                                   QGraphicsRectItem, QGraphicsScene,
+                                   QGraphicsTextItem, QGraphicsView,
+                                   QVBoxLayout, QWidget)
     GUI_REQUIRED = True
 except Exception:  # noqa: BLE001
     GUI_REQUIRED = False
@@ -139,6 +140,8 @@ if GUI_REQUIRED:
             self._circle_drag = None           # 'circle_move' / 'circle_resize'
             self._circle_drag_start = None
             self._circle_orig = None
+            # DEC-119：只旋转显示（图像与叠加一起转，View 变换保证鼠标坐标自动换算回原图）
+            self._display_rotation = 0
 
             self.setFocusPolicy(Qt.StrongFocus)
             self._init_ui()
@@ -163,6 +166,22 @@ if GUI_REQUIRED:
             self.view.setFocusPolicy(Qt.StrongFocus)
             self.scene.setBackgroundBrush(QColor("#0E1A22"))
             layout.addWidget(self.view)
+
+        # ------------------------------------------------------------------
+        #  显示旋转（DEC-119）
+        # ------------------------------------------------------------------
+        def set_display_rotation(self, degrees: int) -> None:
+            """顺时针旋转显示画面（0/90/180/270）；场景坐标仍是原图像素。"""
+            deg = int(degrees) % 360
+            if deg == self._display_rotation:
+                return
+            self._display_rotation = deg
+            if self.pixmap_item is not None:
+                self._user_zoomed = False
+                self._fit_image()
+
+        def display_rotation(self) -> int:
+            return self._display_rotation
 
         # ------------------------------------------------------------------
         #  显示
@@ -218,6 +237,8 @@ if GUI_REQUIRED:
             if not text:
                 return
             self._status_item = QGraphicsTextItem(text)
+            self._status_item.setFlag(
+                QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, True)
             self._status_item.setDefaultTextColor(QColor("#93A6B2"))
             self._status_item.setFont(QFont("Microsoft YaHei", 11))
             self.scene.addItem(self._status_item)
@@ -247,8 +268,12 @@ if GUI_REQUIRED:
             iw, ih = self.image_size.width(), self.image_size.height()
             if iw <= 0 or ih <= 0:
                 return
+            if self._display_rotation % 180:      # 90/270：显示宽高互换
+                iw, ih = ih, iw
             scale = min(vr.width() / iw, vr.height() / ih)
             self.view.resetTransform()
+            if self._display_rotation:
+                self.view.rotate(self._display_rotation)   # 顺时针
             self.view.scale(scale, scale)
             self.view.centerOn(self.pixmap_item)
 
@@ -796,10 +821,16 @@ if GUI_REQUIRED:
             self._mark_items = []
 
         def set_points_overlay(self, points, color=_POINT_COLOR, r=5) -> None:
+            """逐点画十字标记。``points`` 元素可为 ``(x, y)`` 或 ``(x, y, (r,g,b))``
+            指定该点颜色（DEC-144：棱线测量左右棱用不同颜色）。"""
             self.clear_points_overlay()
-            c = QColor(int(color[0]), int(color[1]), int(color[2]))
+            default = QColor(int(color[0]), int(color[1]), int(color[2]))
             for p in points:
                 x, y = float(p[0]), float(p[1])
+                c = default
+                if len(p) >= 3 and p[2] is not None:
+                    pc = p[2]
+                    c = QColor(int(pc[0]), int(pc[1]), int(pc[2]))
                 dot = QGraphicsEllipseItem(x - r, y - r, r * 2, r * 2)
                 dot.setBrush(QBrush(c))
                 dot.setPen(QPen(Qt.PenStyle.NoPen))
@@ -1077,7 +1108,10 @@ if GUI_REQUIRED:
             if delta == 0:
                 return
             factor = 1.2 if delta > 0 else 1 / 1.2
-            cur = self.view.transform().m11()
+            # DEC-132：显示旋转（DEC-119）后变换矩阵的 m11 旋转到 0，直接用 m11
+            # 判断缩放会让滚轮失效；按矩阵的缩放幅度 sqrt(m11^2 + m12^2) 判断。
+            t = self.view.transform()
+            cur = (t.m11() ** 2 + t.m12() ** 2) ** 0.5
             if cur * factor < 0.05 or cur * factor > 60:
                 return
             self._user_zoomed = True

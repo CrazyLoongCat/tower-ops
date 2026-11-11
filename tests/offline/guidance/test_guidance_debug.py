@@ -80,6 +80,24 @@ class RecordHost:
 
 
 # ---------------------------------------------------------------- 深度阶段
+def test_no_target_message_includes_valid_depth_range_hint():
+    """无候选时消息带本帧有效深度 P5–P95（DEC-131 附加）：
+    典型误配是切分范围把场景整体切掉（目标 500mm、切分 600–3000mm）。"""
+    frame = _frame()
+    params = _depth_params(depth_min_mm=600.0, depth_max_mm=3000.0)
+    res = run_circle_debug(frame, depth_params=params,
+                           circle_params=CircleParams(), only_depth=True)
+    assert not res.ok and res.stage == "depth"
+    assert "未找到候选目标" in res.message
+    assert "有效深度 P5–P95" in res.message
+    assert "500–500 mm" in res.message           # 有效像素只有 500mm 的圆盘
+    # 把下限调回目标以内即恢复
+    params2 = _depth_params(depth_min_mm=450.0, depth_max_mm=3000.0)
+    res2 = run_circle_debug(frame, depth_params=params2,
+                            circle_params=CircleParams(), only_depth=True)
+    assert res2.ok and res2.rects
+
+
 def test_depth_stage_returns_stage_images_and_rects():
     stage = depth_guidance_stage(_frame(), _depth_params())
     assert set(stage.stages) == {"depth_mm", "gray", "binary", "filtered",
@@ -259,6 +277,36 @@ def test_run_circle_debug_full_chain_ok():
     assert res.cam_xyz[2] == pytest.approx(500.0, abs=2.0)
     assert res.coarse is not None and res.fine is not None
     assert res.stages.get("debug_image") is not None
+    # DEC-147：命中圆带物理直径（28px @ 500mm、fx=fy=200 → 140mm）
+    assert res.hits[0].diameter_mm == pytest.approx(140.0, abs=2.0)
+    assert res.selected is not None
+    assert res.selected.diameter_mm == pytest.approx(140.0, abs=2.0)
+
+
+def test_circle_hit_is_frozen_replace_for_diameter():
+    """DEC-150 回归：CircleHit 是 frozen dataclass——直径必须用 replace 生成新实例，
+    原地赋值会抛 FrozenInstanceError（曾把整条找圆调试链打断）。"""
+    from dataclasses import FrozenInstanceError, replace
+    hit = CircleHit(0, 160.0, 120.0, 28.0)
+    assert hit.diameter_mm == 0.0
+    try:
+        hit.diameter_mm = 1.0            # 必须抛异常（frozen）
+    except FrozenInstanceError:
+        pass
+    else:                                # pragma: no cover
+        raise AssertionError("CircleHit 不应允许原地赋值")
+    new = replace(hit, diameter_mm=140.0)
+    assert new.diameter_mm == 140.0 and hit.diameter_mm == 0.0
+
+
+def test_circle_diameter_mm_formula():
+    """DEC-147：直径(mm)=2·r_px·Z/√(fx·fy)；深度/内参非法时如实返回 0。"""
+    from application.services.guidance_service import circle_diameter_mm
+    assert circle_diameter_mm(28.0, 500.0, {"fx": 200.0, "fy": 200.0}) \
+        == pytest.approx(140.0)
+    assert circle_diameter_mm(28.0, 0.0, {"fx": 200.0, "fy": 200.0}) == 0.0
+    assert circle_diameter_mm(0.0, 500.0, {"fx": 200.0, "fy": 200.0}) == 0.0
+    assert circle_diameter_mm(28.0, 500.0, {"fx": 0.0, "fy": 0.0}) == 0.0
 
 
 def test_run_circle_debug_applies_offset_axis_mapping():
@@ -273,3 +321,39 @@ def test_run_circle_debug_applies_offset_axis_mapping():
     assert res.cam_xyz[1] == pytest.approx(0.0, abs=1.0)
     assert res.coarse == pytest.approx((0.0, -25.0), abs=2.0)   # (robot_x=-y, robot_z=-x)
     assert res.fine == pytest.approx((0.0, -25.0), abs=2.0)
+
+
+# ---------------------------------------------------------------- DEC-135 批量找圆
+def test_find_circles_sends_all_rects_in_one_request():
+    """所有矩形一次 IPC 送宿主（不再每矩形一次）；结果按圆心归属到对应矩形。"""
+    host = RecordHost(circles=[(160.0, 120.0, 28.0), (260.0, 120.0, 20.0)])
+    rects = [_rect(110, 70, 210, 170, idx=0), _rect(210, 70, 310, 170, idx=1)]
+    hits, errors = find_circles_in_rects(
+        np.zeros((H, W, 3), dtype="uint8"), rects, CircleParams(), host)
+    assert errors == []
+    assert len(host.calls) == 1, "多矩形应合并为一次请求"
+    _images, algo_rects, _params = host.calls[0]
+    assert len(algo_rects) == 2 and algo_rects[0][1:5] == [110, 70, 100, 100]
+    by_rect = {h.rect_index: (h.cx, h.cy) for h in hits}
+    assert by_rect == {0: (160.0, 120.0), 1: (260.0, 120.0)}
+
+
+def test_find_circles_falls_back_to_per_rect_when_batch_fails():
+    """批量请求整体失败时退回逐矩形，错误粒度与旧行为一致。"""
+    class _FailBatch(RecordHost):
+        def __init__(self):
+            super().__init__()
+            self.n = 0
+
+        def detect(self, images, rects, params):
+            self.n += 1
+            if self.n == 1:
+                raise RuntimeError("批量注入失败")
+            return super().detect(images, rects, params)
+
+    host = _FailBatch()
+    rects = [_rect(110, 70, 210, 170, idx=0), _rect(210, 70, 310, 170, idx=1)]
+    hits, errors = find_circles_in_rects(
+        np.zeros((H, W, 3), dtype="uint8"), rects, CircleParams(), host)
+    assert any("整批找圆失败" in e for e in errors)
+    assert len(host.calls) == 2            # 1 次批量失败 + 2 次逐矩形（RecordHost 记录每次）

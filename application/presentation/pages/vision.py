@@ -33,9 +33,11 @@
 """
 from __future__ import annotations
 
+import os
 from dataclasses import asdict, replace, is_dataclass
 
 from application.adapters.s100.legacy import PROTOCOL_NAME as LEGACY_S100_PROTOCOL
+from application.bootstrap import app_paths
 from application.presentation.components import Card, EmptyHint, KV, SectionTitle
 from application.presentation.components.annot_image_view import AnnotImageView
 from application.presentation.components.image_view import GUI_REQUIRED, ImageView
@@ -46,13 +48,15 @@ if GUI_REQUIRED:  # pragma: no cover - Qt
     from PySide6.QtCore import Qt
     from PySide6.QtWidgets import (
         QCheckBox, QComboBox, QDoubleSpinBox, QGridLayout, QHBoxLayout, QLabel,
-        QListWidget, QListWidgetItem, QPushButton, QScrollArea, QSpinBox,
+        QListWidget, QListWidgetItem, QPushButton, QScrollArea,
+        QSizePolicy, QSpinBox,
         QTabWidget, QVBoxLayout, QWidget,
     )
 
     from application.algorithms.circle.params import CircleParams
     from application.algorithms.guidance.depth_guidance import (
-        CENTER_MODES, MORPH_OPS, SEG_FILTER_MODES, THRESH_METHODS,
+        CENTER_MODES, MORPH_OPS, RECT_FITS, RECT_MODES, SEG_FILTER_MODES,
+        THRESH_METHODS,
         DepthGuidanceParams,
     )
     from application.services.guidance_debug import (
@@ -151,12 +155,33 @@ if GUI_REQUIRED:
             self.btn_cap = QPushButton("单次抓拍"); self.btn_cap.setObjectName("Primary")
             self.btn_cap.clicked.connect(self._capture)
             head.addWidget(self.btn_cap)
+            self.btn_open_file = QPushButton("载入图片"); self.btn_open_file.setObjectName("Ghost")
+            self.btn_open_file.setToolTip(
+                "载入本地抓帧（彩色图 + _depth.npy/_depth16.png + _depth.json）离线查看/调参；"
+                "不连相机、不影响现场")
+            self.btn_open_file.clicked.connect(self._load_local_images)
+            head.addWidget(self.btn_open_file)
+            self.btn_save_img = QPushButton("保存图片"); self.btn_save_img.setObjectName("Ghost")
+            self.btn_save_img.setEnabled(False)
+            self.btn_save_img.setToolTip(
+                "保存本次抓拍帧：彩色 PNG + 原始深度（npy / 16位PNG / JSON 元数据）+ 伪彩预览；"
+                "均不含显示旋转与图像算法预览")
+            self.btn_save_img.clicked.connect(self._save_captured_image)
+            head.addWidget(self.btn_save_img)
             self.btn_run = QPushButton("运行判定"); self.btn_run.setObjectName("Ghost")
             self.btn_run.clicked.connect(self._run_pipeline)
             head.addWidget(self.btn_run)
+            # DEC-133：可选择覆盖哪条已保存检测；不选（新建）则弹名称新建
+            self.det_overwrite = QComboBox()
+            self.det_overwrite.setMinimumWidth(150)
+            self.det_overwrite.setMaximumWidth(260)
+            self.det_overwrite.setToolTip(
+                "选择要覆盖的已保存视觉检测；选「（新建）」则保存为新检测")
+            head.addWidget(self.det_overwrite)
             self.btn_save_det = QPushButton("另存为检测"); self.btn_save_det.setObjectName("Ghost")
             self.btn_save_det.setToolTip(
-                "把当前通道 + 检测流水线 + 参数快照存成一条命名「视觉检测」，"
+                "把当前通道 + 检测流水线 + 参数快照存成一条命名「视觉检测」"
+                "（覆盖上面下拉选中的检测；选「（新建）」则新建），"
                 "执行方案 vision.run 步骤即可引用它（不是发布）")
             self.btn_save_det.clicked.connect(self._save_as_detection)
             head.addWidget(self.btn_save_det)
@@ -199,20 +224,45 @@ if GUI_REQUIRED:
 
             # ---- 主图 (中列): 彩色在上、深度在下 (**上下叠放**, 不再左右并排) ----
             self.mid = Card("主图（算法只作用于这里，原始帧不动）")
-            imgs = QVBoxLayout(); imgs.setSpacing(10)
-            for caption, attr in (("彩色", "view_color"),
-                                  ("深度（伪彩，0/65535=无效）", "view_depth")):
+            mid_bar = QHBoxLayout(); mid_bar.addStretch(1)
+            self.btn_image_popup = QPushButton("弹窗")
+            self.btn_image_popup.setCheckable(True)
+            self.btn_image_popup.setToolTip("把主图（彩色+深度）弹出为独立窗口；再点一次关闭")
+            self.btn_image_popup.toggled.connect(self._toggle_image_popup)
+            mid_bar.addWidget(self.btn_image_popup)
+            self.mid.body().addLayout(mid_bar)
+            # DEC-129：用 QGridLayout 两行等拉伸，保证彩色/深度两格高度（进而宽度）一致
+            imgs = QGridLayout(); imgs.setSpacing(10)
+            imgs.setRowStretch(0, 1)
+            imgs.setRowStretch(1, 1)
+            imgs.setColumnStretch(0, 1)
+            for row, (caption, attr) in enumerate((("彩色", "view_color"),
+                                                   ("深度（伪彩，0/65535=无效）",
+                                                    "view_depth"))):
                 cell = QWidget(); cv = QVBoxLayout(cell)
                 cv.setContentsMargins(0, 0, 0, 0); cv.setSpacing(4)
                 cap = QLabel(caption); cap.setObjectName("SubLabel")
                 # 彩色用**可交互标注**视图（绘制/调整多边形、ROI、叠加），深度只读显示
                 view = (AnnotImageView("尚未抓拍") if attr == "view_color"
                         else ImageView("尚未抓拍"))
+                # DEC-129：彩色/深度两格**等宽等高**（同为 Expanding、同一最小高度）；
+                # 此前彩色用了 AnnotImageView 的默认 Preferred 策略，纵向被深度的
+                # Expanding 挤成一条窄带。
+                view.setSizePolicy(QSizePolicy.Policy.Expanding,
+                                   QSizePolicy.Policy.Expanding)
+                view.setMinimumHeight(200)
                 cv.addWidget(cap); cv.addWidget(view, 1)
                 setattr(self, "cap_color" if attr == "view_color" else "cap_depth", cap)
                 setattr(self, attr, view)
-                imgs.addWidget(cell, 1)
+                imgs.addWidget(cell, row, 0)
             self.mid.body().addLayout(imgs, 1)
+            # 深度取点读数放在两格**下方**（不占深度格高度 -> 两行严格等高，DEC-129/130）
+            self.depth_probe = QLabel(
+                "点击深度图可查看该点深度（原始值 / mm / 相机 XYZ）")
+            self.depth_probe.setObjectName("SubLabel")
+            self.depth_probe.setWordWrap(True)
+            self.mid.body().addWidget(self.depth_probe)
+            self.view_depth.clicked.connect(self._on_depth_click)
             self.src_hint = QLabel(""); self.src_hint.setObjectName("SubLabel")
             self.src_hint.setWordWrap(True)
             self.preview_hint = QLabel(""); self.preview_hint.setObjectName("SubLabel")
@@ -220,6 +270,7 @@ if GUI_REQUIRED:
             self.mid.add(self.src_hint)
             self.mid.add(self.preview_hint)
             body.addWidget(self.mid, 4)
+            self._image_slot = body
 
             # ---- 右列: 参数面板 (与主图**并排**)。用**页签**分「图像算法」「视觉分割」：
             # 两套参数各自成页，都不再占主图高度；页签本身只占一列宽度。 ----
@@ -341,6 +392,33 @@ if GUI_REQUIRED:
             circle_bar.addWidget(self.btn_cd_load_cfg)
             self.circle.body().addLayout(circle_bar)
             self.right_tabs.addTab(self.circle, "找圆调试")
+
+            # ---- 「棱线测量」页签：平面两条棱线间距（DEC-143 脚本界面化，DEC-144） ----
+            self.edge = Card("棱线测量（深度最大平面 → 两条棱线间距）")
+            self.edge.body().addWidget(self._build_edge_panel(), 1)
+            edge_help = QLabel(
+                "流程：当前帧 → 「测量棱线间距」（有效深度 → 逆深度 RANSAC 最大平面 → "
+                "逐行/逐列取轮廓两端点 → 两侧各拟合 3D 直线，两侧同为内点的行求同高度"
+                "两端点三维距离）。主图叠加：红线=一侧棱边、绿线=另一侧棱边。参数全部"
+                "可调；只调试、不驱动机械臂、不改配方。")
+            edge_help.setObjectName("SubLabel"); edge_help.setWordWrap(True)
+            self.edge.add(edge_help)
+            edge_bar = QHBoxLayout()
+            self.btn_edge_run = QPushButton("测量棱线间距")
+            self.btn_edge_run.setObjectName("Primary")
+            self.btn_edge_run.setToolTip(
+                "用当前帧深度数据测「最大平面」两条轮廓棱线的三维间距（面宽）")
+            self.btn_edge_run.clicked.connect(self._run_edge_measure)
+            self.btn_edge_clear = QPushButton("清除叠加")
+            self.btn_edge_clear.setObjectName("Ghost")
+            self.btn_edge_clear.setToolTip("清除棱线测量的左右端点叠加")
+            self.btn_edge_clear.clicked.connect(self._clear_edge_overlay)
+            edge_bar.addWidget(self.btn_edge_run)
+            edge_bar.addWidget(self.btn_edge_clear)
+            edge_bar.addStretch(1)
+            self.edge.body().addLayout(edge_bar)
+            self.right_tabs.addTab(self.edge, "棱线测量")
+
             self.right_tabs.currentChanged.connect(self._on_right_tab_changed)
 
             body.addWidget(self.right_tabs, 2)
@@ -561,32 +639,41 @@ if GUI_REQUIRED:
 
         # ---------- 多边形 / ROI 状态 ----------
         def _set_polygon(self, pts) -> None:  # pragma: no cover - Qt
+            """设置多边形（**原始帧坐标**）；画到预览上时按当前几何变换换算。"""
             self._polygon = [list(p) for p in (pts or [])]
             if len(self._polygon) >= 3:
-                self.view_color.set_polygon_overlay(self._polygon)
+                self.view_color.set_polygon_overlay(
+                    [self._orig_to_preview_pt(p[0], p[1]) for p in self._polygon])
             else:
                 self.view_color.clear_polygon_overlay()
             self._update_seg_hint()
 
         def _set_roi(self, roi) -> None:  # pragma: no cover - Qt
+            """设置 ROI（**原始帧坐标**）；预览上画按当前几何变换换算。"""
             self._roi = tuple(roi) if roi else None
-            if self._roi:
-                self.view_color.set_roi_overlay(*self._roi)
+            disp = self._orig_to_preview_roi(self._roi)
+            if disp:
+                self.view_color.set_roi_overlay(*disp)
             else:
                 self.view_color.clear_roi_overlay()
             self._update_seg_hint()
 
         def _on_polygon_drawn(self, pts) -> None:  # pragma: no cover - Qt
-            self._set_polygon(pts)
+            self._set_polygon(
+                [self._preview_to_orig_pt(p[0], p[1]) for p in (pts or [])])
             # 画完即退出绘制模式（与旧工程一致：画一次就停，避免误加多余点）
             self.btn_draw_poly.setChecked(False)
             self.view_color.set_annotation_mode(None)
 
         def _on_polygon_edited(self, pts) -> None:  # pragma: no cover - Qt
-            self._set_polygon(pts)
+            self._set_polygon(
+                [self._preview_to_orig_pt(p[0], p[1]) for p in (pts or [])])
 
         def _on_roi_drawn(self, x1, y1, x2, y2) -> None:  # pragma: no cover - Qt
-            self._set_roi((x1, y1, x2, y2))
+            ox1, oy1 = self._preview_to_orig_pt(x1, y1)
+            ox2, oy2 = self._preview_to_orig_pt(x2, y2)
+            self._set_roi((min(ox1, ox2), min(oy1, oy2),
+                           max(ox1, ox2), max(oy1, oy2)))
             self.btn_draw_roi.setChecked(False)
             self.view_color.set_annotation_mode(None)
 
@@ -667,34 +754,137 @@ if GUI_REQUIRED:
             self.view_color.set_edit_mode(False)
             self._update_seg_hint()
 
-        def _geo_transform_active(self) -> str:  # pragma: no cover - Qt
-            """当前显示预览启用的**非恒等几何变换**说明（镜像/旋转），无则空串。
+        def _preview_geometry(self) -> tuple[bool, bool, int]:
+            """当前主图预览实际套用的几何变换 (水平镜像, 垂直镜像, 旋转角度)。
 
-            分割在下**原始帧**坐标上运算，而主图显示的是套过图像算法的预览；一旦镜像或
-            旋转，画在预览上的坐标就不再对应原始帧 —— 与其悄悄算错，不如在绘制前拦住。
+            「原图对照」勾选时预览就是原始帧，几何变换未生效 -> 返回恒等。
             """
-            bits = []
-            for key, text in (("hflip", "水平镜像"), ("vflip", "垂直镜像")):
-                entry = self._widgets.get(key)
-                if entry and entry[0].isChecked():
-                    bits.append(text)
+            if getattr(self, "chk_raw", None) is not None and self.chk_raw.isChecked():
+                return False, False, 0
+            hflip = vflip = False
+            entry = self._widgets.get("hflip")
+            if entry:
+                hflip = bool(entry[0].isChecked())
+            entry = self._widgets.get("vflip")
+            if entry:
+                vflip = bool(entry[0].isChecked())
+            rot = 0
             entry = self._widgets.get("rotate")
             if entry:
                 try:
-                    deg = int(entry[0].currentData() or 0)
+                    rot = int(entry[0].currentData() or 0) % 360
                 except (TypeError, ValueError):
-                    deg = 0
-                if deg % 360:
-                    bits.append(f"旋转 {deg}°")
+                    rot = 0
+            return hflip, vflip, rot
+
+        def _frame_size_wh(self):
+            frame = self._frame
+            data = getattr(getattr(frame, "color", None), "data", None)
+            if data is None:
+                data = getattr(getattr(frame, "depth", None), "data", None)
+            if data is None or getattr(data, "ndim", 0) < 2:
+                return None
+            return int(data.shape[1]), int(data.shape[0])
+
+        def _orig_to_preview_pt(self, x, y):
+            """原始帧像素 -> 预览图像素（与 image_ops.apply_geometry 同序：先镜像后旋转）。"""
+            size = self._frame_size_wh()
+            hflip, vflip, rot = self._preview_geometry()
+            if size is None or (not hflip and not vflip and not rot):
+                return float(x), float(y)
+            w, h = size
+            x, y = float(x), float(y)
+            if vflip:
+                y = (h - 1) - y
+            if hflip:
+                x = (w - 1) - x
+            if rot == 90:          # 顺时针 90
+                x, y = (h - 1) - y, x
+            elif rot == 180:
+                x, y = (w - 1) - x, (h - 1) - y
+            elif rot == 270:       # 逆时针 90
+                x, y = y, (w - 1) - x
+            return x, y
+
+        def _preview_to_orig_pt(self, x, y):
+            """预览图像素 -> 原始帧像素（_orig_to_preview_pt 的逆变换）。"""
+            size = self._frame_size_wh()
+            hflip, vflip, rot = self._preview_geometry()
+            if size is None or (not hflip and not vflip and not rot):
+                return float(x), float(y)
+            w, h = size
+            x, y = float(x), float(y)
+            if rot == 90:
+                x, y = y, (h - 1) - x
+            elif rot == 180:
+                x, y = (w - 1) - x, (h - 1) - y
+            elif rot == 270:
+                x, y = (w - 1) - y, x
+            if hflip:
+                x = (w - 1) - x
+            if vflip:
+                y = (h - 1) - y
+            return x, y
+
+        @staticmethod
+        def _point_xy(p):
+            """把 (x,y) / [[x,y]] / (2,1) 等形状统一取成 (x, y)；取不到返回 None。"""
+            try:
+                import numpy as _np
+                flat = _np.asarray(p, dtype=float).reshape(-1)
+            except Exception:  # noqa: BLE001
+                return None
+            if flat.size < 2:
+                return None
+            return float(flat[0]), float(flat[1])
+
+        def _orig_to_preview_points(self, points) -> list:
+            out = []
+            if points is None:          # numpy 数组不能直接 `or`（真值不明确）
+                return out
+            for p in points:
+                xy = self._point_xy(p)
+                if xy is None:
+                    continue
+                out.append(self._orig_to_preview_pt(*xy))
+            return out
+
+        def _orig_to_preview_contours(self, contours) -> list:
+            out = []
+            if contours is None:
+                return out
+            for contour in contours:
+                pts = self._orig_to_preview_points(contour)
+                if pts:
+                    out.append(pts)
+            return out
+
+        def _orig_to_preview_roi(self, roi):
+            if not roi:
+                return None
+            x1, y1 = self._orig_to_preview_pt(roi[0], roi[1])
+            x2, y2 = self._orig_to_preview_pt(roi[2], roi[3])
+            return (min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2))
+
+        def _geo_transform_active(self) -> str:  # pragma: no cover - Qt
+            """当前预览启用的**非恒等几何变换**说明（镜像/旋转），无则空串。"""
+            hflip, vflip, rot = self._preview_geometry()
+            bits = []
+            if hflip:
+                bits.append("水平镜像")
+            if vflip:
+                bits.append("垂直镜像")
+            if rot:
+                bits.append(f"旋转 {rot}°")
             return "、".join(bits)
 
         def _blocked_by_geometry(self) -> str | None:  # pragma: no cover - Qt
-            """几何变换生效时给出拒绝说明（分割/运行一次都用原始帧坐标）。"""
-            geo = self._geo_transform_active()
-            if not geo:
-                return None
-            return (f"当前显示预览启用了几何变换（{geo}）：绘制/分割的坐标是原始帧坐标，"
-                    f"与变换后的预览不再对齐。请先到「图像算法」页把几何变换恢复默认再操作。")
+            """DEC-120：几何变换不再阻止绘制/分割。
+
+            多边形/ROI 一律按**原始帧坐标**保存（分割与方案都在原始帧上跑），
+            画在预览上的像素点进来时用逆变换换算回原始帧，叠加显示时再正变换回去。
+            """
+            return None
 
         def _update_seg_hint(self) -> None:  # pragma: no cover - Qt
             bits = []
@@ -710,7 +900,7 @@ if GUI_REQUIRED:
                 bits.append(f"模式={mode}")
             geo = self._geo_transform_active()
             if geo:
-                bits.append(f"⚠几何变换生效（{geo}）：分割/绘制已停用")
+                bits.append(f"几何变换生效（{geo}）：坐标按原始帧记录、显示自动换算")
             self.seg_hint.setText("；".join(bits))
 
         # ---------- 深度分割 / 运行一次 ----------
@@ -745,9 +935,12 @@ if GUI_REQUIRED:
             off = seg.get("roi_offset", (0, 0))
             contours = [self._shift_contour(c, off) for c in seg["contours"]]
             prompts = [offset_points(g, off) for g in seg["prompts"]]
-            self.view_color.set_contours_overlay(contours)
+            # 结果在原图坐标算；显示到预览上按当前几何变换换算（DEC-120）
+            self.view_color.set_contours_overlay(
+                self._orig_to_preview_contours(contours))
             self.view_color.clear_mark_overlay()
-            self.view_color.set_points_overlay([p for g in prompts for p in g])
+            self.view_color.set_points_overlay(
+                self._orig_to_preview_points([p for g in prompts for p in g]))
             self.result.setText("\n".join([
                 "深度分割完成（只标轮廓与提示点，未做智能分割）",
                 f"  参数过滤后轮廓数={seg['n_contours']}；最终保留={len(contours)}",
@@ -786,9 +979,14 @@ if GUI_REQUIRED:
                 self.result.setText(f"运行一次未完成：{res.error}")
                 return
             # 叠加：轮廓=绿、交集=红、提示点=黄十字（与旧工程一致）
-            self.view_color.set_contours_overlay(res.depth_contours)
-            self.view_color.set_mark_overlay(res.intersection_contours)
-            self.view_color.set_points_overlay([p for g in res.prompts for p in g])
+            # 结果在原图坐标算；显示时按当前几何变换换算（DEC-120）
+            self.view_color.set_contours_overlay(
+                self._orig_to_preview_contours(res.depth_contours))
+            self.view_color.set_mark_overlay(
+                self._orig_to_preview_contours(res.intersection_contours))
+            self.view_color.set_points_overlay(
+                self._orig_to_preview_points(
+                    [p for g in res.prompts for p in g]))
             lines = [
                 "运行一次完成（真实算法路径：深度分割 → 智能分割 → 交集）",
                 f"  处理图源={res.source}（{res.source_note}）",
@@ -815,6 +1013,159 @@ if GUI_REQUIRED:
         # =================================================================
         #  找圆调试（旧工程 ROBOT 引导调试页并入；与上面两页签并集）
         # =================================================================
+        # ---------- 棱线测量（DEC-144：DEC-143 脚本的界面化，参数全可调） ----------
+        def _build_edge_panel(self):  # pragma: no cover - Qt
+            """平面两棱线间距面板：平面 RANSAC / 扫描 / 深度限定 / 量程参数。"""
+            inner = QWidget()
+            form = QVBoxLayout(inner)
+            form.setContentsMargins(2, 2, 2, 2); form.setSpacing(6)
+            self._edge_widgets: dict = {}
+
+            def row(label, widget):
+                h = QWidget(); hl = QHBoxLayout(h)
+                hl.setContentsMargins(0, 0, 0, 0); hl.setSpacing(6)
+                lab = QLabel(label); lab.setObjectName("SubLabel")
+                hl.addWidget(lab); hl.addWidget(widget, 1)
+                form.addWidget(h)
+
+            def combo(key, choices, default, tip=""):
+                w = QComboBox()
+                for code, text in choices:
+                    w.addItem(str(text), code)
+                idx = w.findData(default)
+                w.setCurrentIndex(idx if idx >= 0 else 0)
+                w.setToolTip(tip)
+                self._edge_widgets[key] = w
+                return w
+
+            def spin(key, lo, hi, val, step=1, tip=""):
+                w = QSpinBox(); w.setRange(lo, hi); w.setSingleStep(step)
+                w.setValue(val); w.setToolTip(tip)
+                self._edge_widgets[key] = w
+                return w
+
+            def dspin(key, lo, hi, val, step=1.0, dec=1, tip=""):
+                w = QDoubleSpinBox(); w.setRange(lo, hi); w.setSingleStep(step)
+                w.setDecimals(dec); w.setValue(val); w.setToolTip(tip)
+                self._edge_widgets[key] = w
+                return w
+
+            form.addWidget(SectionTitle("平面与扫描参数"))
+            row("平面容差 mm", dspin("tol_mm", 1.0, 100.0, 8.0,
+                                   tip="逆深度 RANSAC 最大平面的内点深度容差"))
+            row("开运算核 px", spin("open_kernel", 3, 51, 5, step=2,
+                                  tip="掩膜去毛刺的椭圆核（奇数；越小越少削棱边）"))
+            row("扫描方向", combo("scan",
+                                 (("auto", "自动（按长轴）"),
+                                  ("row", "按行扫左右"),
+                                  ("col", "按列扫上下")), "auto",
+                                 tip="画面整体旋转 90° 时可强制按列扫描"))
+            row("最小跨度 px", spin("min_span", 10, 2000, 60,
+                                  tip="扫描线两端跨度小于该值的行忽略"))
+            row("直线内点 mm", dspin("line_thr_mm", 0.5, 50.0, 3.0,
+                                   tip="两侧棱边 3D 直线拟合的内点容差"))
+            form.addWidget(SectionTitle("深度限定与量程"))
+            row("深度下限 mm", dspin("depth_min_mm", 0.0, 65535.0, 0.0, dec=0,
+                                    tip="只用 ≥该深度(mm) 的有效点；0 = 不限"))
+            row("深度上限 mm", dspin("depth_max_mm", 0.0, 65535.0, 0.0, dec=0,
+                                    tip="只用 ≤该深度(mm) 的有效点；0 = 不限"))
+            row("量程下限 mm", dspin("min_width_mm", 1.0, 5000.0, 5.0,
+                                    tip="测得宽度低于该值视为无效"))
+            row("量程上限 mm", dspin("max_width_mm", 10.0, 10000.0, 3000.0,
+                                    tip="测得宽度高于该值视为无效"))
+            form.addStretch(1)
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+            scroll.setMinimumHeight(130)
+            scroll.setWidget(inner)
+            return scroll
+
+        def _edge_value(self, key):
+            w = self._edge_widgets[key]
+            if isinstance(w, QComboBox):
+                return w.currentData()
+            return w.value()
+
+        def _clear_edge_overlay(self) -> None:  # pragma: no cover - Qt
+            v = self.view_color
+            v.clear_contours_overlay()
+            v.clear_mark_overlay()
+            v.clear_points_overlay()
+            v.clear_circle_overlay()
+            self.result.setText("已清除棱线测量叠加")
+
+        def _run_edge_measure(self) -> None:  # pragma: no cover - Qt
+            """用当前帧深度测「最大平面」两条棱线间距，并叠加左右棱边点。"""
+            from application.algorithms.guidance.plane_width import (
+                measure_plane_width,
+            )
+            frame = self._frame
+            if frame is None:
+                self.result.setText("请先「单次抓拍」或载入本地图片（四件套），"
+                                    "再做棱线测量")
+                return
+            depth = getattr(getattr(frame, "depth", None), "data", None)
+            scale = getattr(frame, "depth_scale_m", None)
+            intr_obj = getattr(frame, "intrinsics", None)
+            if depth is None or not scale:
+                self.result.setText("当前帧缺原始深度或 depth_scale，不能做棱线测量")
+                return
+            intr = None
+            if intr_obj is not None:
+                try:
+                    intr = {"fx": float(intr_obj.fx), "fy": float(intr_obj.fy),
+                            "cx": float(intr_obj.cx), "cy": float(intr_obj.cy)}
+                except Exception:  # noqa: BLE001
+                    intr = None
+            if intr is None:
+                self.result.setText("当前帧缺内参（fx/fy/cx/cy），不能把像素换算成"
+                                    "毫米；请载入带 _depth.json 的四件套或连相机抓拍")
+                return
+            info = measure_plane_width(
+                depth, float(scale), intr,
+                tol_mm=float(self._edge_value("tol_mm")),
+                open_kernel=int(self._edge_value("open_kernel")),
+                line_thr_mm=float(self._edge_value("line_thr_mm")),
+                min_span=int(self._edge_value("min_span")),
+                scan=str(self._edge_value("scan")),
+                depth_min_mm=float(self._edge_value("depth_min_mm")),
+                depth_max_mm=float(self._edge_value("depth_max_mm")),
+                min_width_mm=float(self._edge_value("min_width_mm")),
+                max_width_mm=float(self._edge_value("max_width_mm")))
+            if not info.get("ok"):
+                self.view_color.clear_points_overlay()
+                tip = info.get("reason", "测量失败")
+                if "width_mm" in info:
+                    tip += f"（测得 {float(info['width_mm']):.1f}mm）"
+                self.result.setText(f"棱线测量失败：{tip}")
+                return
+            # 主图叠加：左棱红、右棱绿（原图坐标 → 当前显示坐标）
+            pts = []
+            for pl, pr in info.get("pairs") or []:
+                for p, col in ((pl, (235, 64, 52)), (pr, (46, 160, 67))):
+                    z = max(float(p[2]), 1.0)
+                    u = intr["fx"] * float(p[0]) / z + intr["cx"]
+                    v = intr["fy"] * float(p[1]) / z + intr["cy"]
+                    pu, pv = self._orig_to_preview_pt(u, v)
+                    pts.append((pu, pv, col))
+            v = self.view_color
+            v.clear_contours_overlay()
+            v.clear_mark_overlay()
+            v.clear_circle_overlay()
+            v.set_points_overlay(pts)
+            lines = [
+                "棱线测量完成",
+                f"  两条棱线间距：{info['width_mm']:.1f} mm"
+                f"（均值 {info['width_mean_mm']:.1f}，IQR {info['width_iqr_mm']:.1f}）",
+                f"  扫描 {info['scan_lines']} 条（{info['scan_mode']}）；"
+                f"两侧直线夹角 {info.get('line_angle_deg', 0.0):.2f}°",
+                f"  平面倾角（法线 vs 光轴）{info['tilt_deg']:.1f}°；"
+                f"面平均深度 {info['face_depth_mm']:.0f} mm",
+                "  说明：单位 mm；红/绿点=两侧棱边；只调试，不驱动机械臂、不改配方。",
+            ]
+            self.result.setText("\n".join(lines))
+
         def _build_circle_panel(self):  # pragma: no cover - Qt
             """深度引导 + 找圆参数面板（样式与分割面板一致，装在滚动区）。
 
@@ -869,9 +1220,20 @@ if GUI_REQUIRED:
 
             form.addWidget(SectionTitle("深度引导参数（步骤1+2）"))
             row("深度下限 mm", dspin("depth_min_mm", 0.0, 65535.0, 200.0, dec=0,
-                                    tip="小于该深度(毫米)视为远/背景"))
+                                    tip="小于该深度(毫米)视为远/背景（自动模式下不生效）"))
             row("深度上限 mm", dspin("depth_max_mm", 0.0, 65535.0, 3000.0, dec=0,
-                                    tip="大于该深度(毫米)视为近/无效"))
+                                    tip="大于该深度(毫米)视为近/无效（自动模式下不生效）"))
+            row("深度范围", combo("depth_range_mode",
+                                 (("auto", "自动（最小深度 / 最大平面）"),
+                                  ("manual", "手动上下限")), "auto",
+                                 tip="DEC-133：自动=下限取本帧最小有效深度−偏移、"
+                                     "上限取最大平面平均深度−偏移；手动=用上面的上下限"))
+            row("自动下限偏移", dspin("auto_min_offset_mm", 0.0, 500.0, 10.0,
+                                    dec=1, tip="自动模式：下限 = 本帧最小有效深度 − 该值（mm）"))
+            row("自动上限偏移", dspin("auto_plane_offset_mm", 0.0, 500.0, 20.0,
+                                    dec=1, tip="自动模式：上限 = 最大平面平均深度 − 该值（mm）"))
+            row("平面容差 mm", dspin("auto_plane_tol_mm", 0.5, 100.0, 8.0,
+                                   dec=1, tip="自动模式：最大平面 RANSAC 内点的深度容差（mm）"))
             row("二值化", combo("thresh_method",
                                tuple((m, m) for m in THRESH_METHODS), "binary_inv",
                                tip="目标比背景近(更暗)时用 binary_inv（旧现场配置）；"
@@ -890,8 +1252,30 @@ if GUI_REQUIRED:
             row("中心方式", combo("center_mode",
                                  tuple((m, m) for m in CENTER_MODES), "bbox",
                                  tip="正外接矩形中心取轮廓质心还是外接框中心"))
+            row("矩形模式", combo("rect_mode",
+                                 (("auto", "自动贴合"), ("fixed", "固定正方形")),
+                                 "auto",
+                                 tip="DEC-131：自动贴合=按轮廓外接框生成矩形（推荐）；"
+                                     "固定正方形=旧算法（中心点+固定边长）"))
+            row("贴合方式", combo("rect_fit",
+                                 (("square", "正方形（取较大边）"),
+                                  ("bbox", "按外接框（可长方形）")), "square",
+                                 tip="自动贴合时：正方形=边长取外接框较大边；"
+                                     "按外接框=宽高各自贴合（矩形可为长方形）"))
+            row("尺寸系数", dspin("rect_scale", 0.1, 5.0, 1.0, step=0.05,
+                                 dec=2,
+                                 tip="自动贴合：外接框尺寸乘以该系数（>1 放大留余量）"))
+            row("外扩边距 px", spin("rect_pad_px", 0, 2000, 20, step=5,
+                                  tip="自动贴合：矩形四周额外外扩的像素"))
+            row("最小边长 px", spin("rect_min_side_px", 0, 10000, 0, step=10,
+                                  tip="自动贴合：边长下限；0 = 不限制"))
+            row("最大边长 px", spin("rect_max_side_px", 0, 10000, 0, step=10,
+                                  tip="自动贴合：边长上限；0 = 不限制"))
+            row("合并间距 px", spin("rect_merge_gap_px", 0, 2000, 0, step=5,
+                                  tip="同一物体的碎块：外接框间距 ≤ 该值即合并成一个"
+                                      "矩形；0 = 不合并"))
             row("矩形边长 px", dspin("rect_side_length", 1.0, 5000.0, 100.0,
-                                    dec=0, tip="以中心点生成的正方形边长（找圆矩形）"))
+                                    dec=0, tip="仅「固定正方形」模式生效（旧算法）"))
             row("均值深度", chk("avg_depth_enable", False,
                               "开启后取圆心圆形区域内有效深度平均值（否则取圆心单点，"
                               "无效时螺旋搜索兜底）"))
@@ -950,6 +1334,10 @@ if GUI_REQUIRED:
             return DepthGuidanceParams(
                 depth_min_mm=float(self._circle_value("depth_min_mm")),
                 depth_max_mm=float(self._circle_value("depth_max_mm")),
+                depth_range_mode=str(self._circle_value("depth_range_mode")),
+                auto_min_offset_mm=float(self._circle_value("auto_min_offset_mm")),
+                auto_plane_offset_mm=float(self._circle_value("auto_plane_offset_mm")),
+                auto_plane_tol_mm=float(self._circle_value("auto_plane_tol_mm")),
                 normalize_by_range=base.normalize_by_range,
                 invalid_as_255=base.invalid_as_255,
                 invalid_raw_threshold=base.invalid_raw_threshold,
@@ -962,6 +1350,13 @@ if GUI_REQUIRED:
                 min_contour_area=float(self._circle_value("min_contour_area")),
                 max_contour_area=float(self._circle_value("max_contour_area")),
                 center_mode=str(self._circle_value("center_mode")),
+                rect_mode=str(self._circle_value("rect_mode")),
+                rect_fit=str(self._circle_value("rect_fit")),
+                rect_scale=float(self._circle_value("rect_scale")),
+                rect_pad_px=float(self._circle_value("rect_pad_px")),
+                rect_min_side_px=float(self._circle_value("rect_min_side_px")),
+                rect_max_side_px=float(self._circle_value("rect_max_side_px")),
+                rect_merge_gap_px=float(self._circle_value("rect_merge_gap_px")),
                 rect_side_length=float(self._circle_value("rect_side_length")),
                 avg_depth_enable=bool(self._circle_value("avg_depth_enable")),
                 avg_depth_diameter=float(self._circle_value("avg_depth_diameter")),
@@ -1176,18 +1571,36 @@ if GUI_REQUIRED:
 
         def _circle_result_text(self, res: "CircleDebugResult") -> str:  # pragma: no cover - Qt
             lines = [f"找圆调试结果（阶段={res.stage}）"]
+            if res.auto_range is not None:      # DEC-133：自动深度范围的来龙去脉
+                ar = res.auto_range
+                if ar.get("ok"):
+                    note = "（上限已抬到下限之上）" if ar.get("clamped") else ""
+                    lines.append(
+                        f"  深度范围（自动）：{ar['min_mm']:g}–{ar['max_mm']:g} mm"
+                        f"（最小深度 {ar['raw_min_mm']:g}−{ar['min_offset_mm']:g}；"
+                        f"最大平面平均 {ar['plane_mean_mm']:g}−{ar['plane_offset_mm']:g}，"
+                        f"平面占比 {ar['plane_ratio'] * 100:.1f}%）{note}")
+                else:
+                    lines.append(
+                        f"  深度范围（自动）失败：{ar.get('reason', '未知原因')}；"
+                        f"沿用手动上下限 {self._circle_value('depth_min_mm'):g}–"
+                        f"{self._circle_value('depth_max_mm'):g} mm")
             lines.append(f"  深度引导：保留轮廓 {res.n_contours}；正外接矩形 {len(res.rects)}")
             if res.hits:
                 lines.append(f"  找圆：命中 {len(res.hits)} 个圆")
                 for h in res.hits:
+                    _dia = float(getattr(h, "diameter_mm", 0.0) or 0.0)
                     lines.append(f"    矩形#{h.rect_index} 圆心 ({h.cx:.1f}, {h.cy:.1f}) "
-                                 f"半径 {h.radius:.1f}px")
+                                 f"半径 {h.radius:.1f}px"
+                                 + (f"，直径≈{_dia:.1f}mm" if _dia > 0 else ""))
             for e in res.rect_errors:
                 lines.append(f"  异常：{e}")
             if res.selected is not None:
                 s = res.selected
+                _sdia = float(getattr(s, "diameter_mm", 0.0) or 0.0)
                 lines.append(f"  选中圆：矩形#{s.rect_index} ({s.cx:.1f}, {s.cy:.1f}) "
-                             f"r={s.radius:.1f}px")
+                             f"r={s.radius:.1f}px"
+                             + (f"，直径≈{_sdia:.1f}mm" if _sdia > 0 else ""))
             if res.cam_xyz is not None:
                 x, y, z = res.cam_xyz
                 lines.append(f"  相机系 XYZ=({x:.2f}, {y:.2f}, {z:.1f}) mm"
@@ -1211,11 +1624,22 @@ if GUI_REQUIRED:
             depth = cfg.depth
             mapping = {
                 "depth_min_mm": depth.depth_min_mm, "depth_max_mm": depth.depth_max_mm,
+                "depth_range_mode": depth.depth_range_mode,
+                "auto_min_offset_mm": depth.auto_min_offset_mm,
+                "auto_plane_offset_mm": depth.auto_plane_offset_mm,
+                "auto_plane_tol_mm": depth.auto_plane_tol_mm,
                 "thresh_method": depth.thresh_method, "thresh_value": depth.thresh_value,
                 "morph_op": depth.morph_op, "morph_kernel_size": depth.morph_kernel_size,
                 "min_contour_area": depth.min_contour_area,
                 "max_contour_area": depth.max_contour_area,
                 "center_mode": depth.center_mode,
+                "rect_mode": depth.rect_mode,
+                "rect_fit": depth.rect_fit,
+                "rect_scale": depth.rect_scale,
+                "rect_pad_px": depth.rect_pad_px,
+                "rect_min_side_px": depth.rect_min_side_px,
+                "rect_max_side_px": depth.rect_max_side_px,
+                "rect_merge_gap_px": depth.rect_merge_gap_px,
                 "rect_side_length": depth.rect_side_length,
                 "avg_depth_enable": depth.avg_depth_enable,
                 "avg_depth_diameter": depth.avg_depth_diameter,
@@ -1255,24 +1679,34 @@ if GUI_REQUIRED:
             v.clear_mark_overlay()
             v.clear_points_overlay()
             v.clear_circle_overlay()
+            # 找圆结果在原图坐标算；显示时按当前几何变换换算（DEC-120）
             if self._circle_contours:
-                v.set_contours_overlay(self._circle_contours)
+                v.set_contours_overlay(
+                    self._orig_to_preview_contours(self._circle_contours))
             marks = []
             for rect in self._circle_rects:
                 x1, y1, x2, y2 = (float(rect["x1"]), float(rect["y1"]),
                                   float(rect["x2"]), float(rect["y2"]))
-                marks.append([[x1, y1], [x2, y1], [x2, y2], [x1, y2]])
+                marks.append([self._orig_to_preview_pt(x1, y1),
+                              self._orig_to_preview_pt(x2, y1),
+                              self._orig_to_preview_pt(x2, y2),
+                              self._orig_to_preview_pt(x1, y2)])
+            preview_hits = []
             for h in self._circle_hits:
-                marks.append(self._circle_outline(h.cx, h.cy, max(h.radius, 1.0)))
+                cx, cy = self._orig_to_preview_pt(h.cx, h.cy)
+                preview_hits.append((cx, cy, h))
+                # 镜像/90°整数倍旋转不改变半径，圆心换到预览坐标即可
+                marks.append(self._circle_outline(cx, cy, max(h.radius, 1.0)))
             if marks:
                 v.set_mark_overlay(marks)
-            if self._circle_hits:
-                v.set_points_overlay([(h.cx, h.cy) for h in self._circle_hits])
-                h0 = self._circle_hits[0]
-                v.set_circle_overlay(h0.cx, h0.cy, max(h0.radius, 1.0))
+            if preview_hits:
+                v.set_points_overlay([(cx, cy) for cx, cy, _h in preview_hits])
+                cx, cy, h0 = preview_hits[0]
+                v.set_circle_overlay(cx, cy, max(h0.radius, 1.0))
 
         def _render_circle_stage(self) -> None:  # pragma: no cover - Qt
             """深度图窗口按「调试画面」显示阶段图；原彩色+矩形时显示原始深度伪彩。"""
+            self._apply_display_rotation(getattr(self._frame, "camera_id", None))
             frame = self._frame
             if frame is None:
                 self.view_depth.clear_image("尚未抓拍")
@@ -1345,9 +1779,13 @@ if GUI_REQUIRED:
             if current is self.seg and self._seg_result is not None \
                     and not self._seg_result.error:
                 res = self._seg_result
-                v.set_contours_overlay(res.depth_contours)
-                v.set_mark_overlay(res.intersection_contours)
-                v.set_points_overlay([p for g in res.prompts for p in g])
+                v.set_contours_overlay(
+                    self._orig_to_preview_contours(res.depth_contours))
+                v.set_mark_overlay(
+                    self._orig_to_preview_contours(res.intersection_contours))
+                v.set_points_overlay(
+                    self._orig_to_preview_points(
+                        [p for g in res.prompts for p in g]))
             self._render_preview()
 
         # ---------- 图像算法面板 (由 PANEL_GROUPS 生成, 不手写控件) ----------
@@ -1579,6 +2017,15 @@ if GUI_REQUIRED:
                 self.chan_list.blockSignals(False)
             self._on_select()
 
+        def _apply_display_rotation(self, camera_id: str | None = None) -> None:
+            """DEC-119：DS86 相机画面按显示旋转 270°（只影响显示，坐标仍是原图）。"""
+            cid = str(camera_id or self.selected_camera() or "")
+            deg = 270 if cid.lower().startswith("ds86") else 0
+            for view in (self.view_color, self.view_depth):
+                setter = getattr(view, "set_display_rotation", None)
+                if callable(setter):
+                    setter(deg)
+
         def selected_camera(self) -> str | None:  # pragma: no cover - Qt
             item = self.chan_list.currentItem()
             if item is None:
@@ -1619,7 +2066,9 @@ if GUI_REQUIRED:
                 self._frame = None
                 self._last_result = None
                 self._frame_camera = None
+                self.btn_save_img.setEnabled(False)
                 self._clear_circle_debug_overlays()
+                self._apply_display_rotation(cam.camera_id)
                 self._render_preview()
 
         def _set_conn_enabled(self, cid: str | None) -> None:  # pragma: no cover - Qt
@@ -1652,6 +2101,139 @@ if GUI_REQUIRED:
             self.refresh()
 
         # ---------- 抓拍 ----------
+        # ---------- 主图弹窗（DEC-129） ----------
+        def _ensure_image_popup(self):
+            popup = getattr(self, "_image_popup", None)
+            if popup is None:
+                from application.presentation.components.capture_popup import (
+                    CapturePopup,
+                )
+                popup = CapturePopup(self.mid, self._image_slot,
+                                     parent=self.window(),
+                                     title="视觉调试 · 主图（彩色 / 深度）")
+                popup.finished.connect(self._on_image_popup_finished)
+                self._image_popup = popup
+            return popup
+
+        def _on_image_popup_finished(self, *_a) -> None:  # pragma: no cover - Qt
+            btn = getattr(self, "btn_image_popup", None)
+            if btn is not None:
+                btn.blockSignals(True)
+                btn.setChecked(False)
+                btn.blockSignals(False)
+
+        def _toggle_image_popup(self, checked: bool) -> None:  # pragma: no cover - Qt
+            popup = self._ensure_image_popup()
+            if checked:
+                popup.attach()
+                popup.show()
+                popup.raise_()
+            else:
+                popup.close()
+
+        def shutdown(self) -> None:  # pragma: no cover - Qt
+            popup = getattr(self, "_image_popup", None)
+            if popup is not None:
+                try:
+                    popup.close()
+                    popup.deleteLater()
+                except Exception:  # noqa: BLE001
+                    pass
+                self._image_popup = None
+
+        # ---------- 载入本地抓帧（DEC-126） ----------
+        def _load_local_images(self) -> None:  # pragma: no cover - Qt
+            """读本地保存的彩色/深度文件当一帧用（离线调参，不连相机）。"""
+            from PySide6.QtWidgets import QFileDialog
+
+            from application.services import frame_import
+
+            start = os.path.join(app_paths.runtime_dir(), "captures")
+            path, _flt = QFileDialog.getOpenFileName(
+                self, "载入本地抓帧",
+                start if os.path.isdir(start) else "",
+                "抓帧文件 (*.npy *.png *.jpg *.jpeg *.json);;所有文件 (*)")
+            if not path:
+                return
+            entries = frame_import.discover_frames([path])
+            if not entries and path.lower().endswith("_depth.json"):
+                entries = [e for e in frame_import.discover_frames(
+                    [os.path.dirname(path)]) if e.meta_path == path]
+            if not entries:
+                self.result.setText(
+                    "没有配对到可用的帧：请选彩色图、_depth.npy/_depth16.png"
+                    "（或选四件套所在目录里任意一张）")
+                return
+            entry = frame_import.load_frame(entries[0])
+            if entry.color is None and entry.depth is None:
+                self.result.setText("该文件没有可读的彩色/深度数据："
+                                    + "；".join(entry.notes))
+                return
+            frame = frame_import.to_bundle(entry)
+            self._frame = frame
+            self._frame_camera = frame.camera_id
+            self._last_result = None
+            self._clear_circle_debug_overlays()
+            self._show_frame(frame, frame.camera_id)
+            self.result.setText("\n".join([
+                f"已载入本地帧：{os.path.basename(entry.name)}（相机 "
+                f"{frame.camera_id}；非实时）",
+                *[f"  {n}" for n in entry.notes],
+                "  深度图可点击查看该点深度；切换通道或重新抓拍会清掉导入帧。",
+            ]))
+
+        def _on_depth_click(self, dx: float, dy: float) -> None:  # pragma: no cover - Qt
+            """DEC-126：深度图取点读值（显示坐标 -> 原始帧坐标，含显示旋转）。"""
+            frame = self._frame
+            if frame is None or frame.depth is None:
+                self.depth_probe.setText("当前没有深度帧")
+                return
+            depth = frame.depth.data
+            h, w = depth.shape[:2]
+            rot = int(self.view_depth.display_rotation() or 0) % 360
+            src = self.view_depth.source_size()
+            exp_w, exp_h = (h, w) if rot % 180 else (w, h)
+            if src is not None and (src[0], src[1]) != (exp_w, exp_h):
+                self.depth_probe.setText(
+                    "当前深度窗口显示的不是整帧深度（阶段图/预览尺寸不同），"
+                    "请切回原图再取点")
+                return
+            # 显示坐标（已含旋转） -> 原始帧坐标
+            x, y = float(dx), float(dy)
+            if rot == 90:
+                x, y = y, (h - 1) - dx
+            elif rot == 180:
+                x, y = (w - 1) - dx, (h - 1) - dy
+            elif rot == 270:
+                x, y = (w - 1) - dy, dx
+            xi, yi = int(round(x)), int(round(y))
+            if not (0 <= xi < w and 0 <= yi < h):
+                self.depth_probe.setText(f"点 ({xi},{yi}) 超出图像范围")
+                return
+            raw = int(depth[yi, xi])
+            if raw in (0, 65535):
+                self.depth_probe.setText(
+                    f"像素 ({xi},{yi}) · 原始 {raw} · 无效深度（0/65535 视为无回波）")
+                return
+            scale = frame.depth_scale_m
+            parts = [f"像素 ({xi},{yi}) · 原始 {raw}"]
+            if scale:
+                mm = float(raw) * float(scale) * 1000.0
+                parts.append(f"{mm:.1f} mm")
+            if frame.intrinsics is not None and scale:
+                from application.algorithms.guidance.depth_guidance import (
+                    compute_xyz_from_depth_mm,
+                )
+                from application.services.guidance_service import intrinsics_to_dict
+                xyz = compute_xyz_from_depth_mm(
+                    float(raw) * float(scale) * 1000.0, xi, yi,
+                    intrinsics_to_dict(frame.intrinsics))
+                if xyz is not None:
+                    parts.append("相机 XYZ=(%.1f, %.1f, %.1f) mm" % tuple(xyz))
+            else:
+                parts.append("缺内参：不算 XYZ")
+            self.depth_probe.setText(" · ".join(parts))
+
         def _capture(self) -> None:  # pragma: no cover - Qt
             cid = self.selected_camera()
             cam = self._selected_entry()
@@ -1661,17 +2243,23 @@ if GUI_REQUIRED:
             if not cam.enabled:
                 self.result.setText(f"{cid} 未启用：不抓拍（先到设备配置页启用并现场核对）")
                 return
-            from application.contracts.frames import CaptureRequest
+            from application.contracts.frames import CaptureRequest, FreshnessPolicy
             stack = self.ctx.stack
             executor = getattr(stack, "executor", None)
             if executor is None:
                 self.result.setText("当前栈没有采集执行器")
                 return
             ctx = getattr(getattr(stack, "task", None), "run_ctx", None) or _ctx_stub(stack)
+            config_store = getattr(stack, "device_config", None)
+            cam_cfg = config_store.find_camera(cid) if config_store is not None else None
+            policy = (FreshnessPolicy.ALLOW_ARRIVAL_ONLY
+                      if getattr(cam_cfg, "protocol", "") == "realsense_usb"
+                      else FreshnessPolicy.REQUIRE_DEVICE_TIME)
             try:
                 cs = executor.capture(ctx, CaptureRequest(
                     camera_ids=(cid,), request_id=f"vision-debug-{cid}",
-                    step_id="vision_debug", allow_partial=True))
+                    step_id="vision_debug", allow_partial=True,
+                    freshness_policy=policy))
             except Exception as exc:  # noqa: BLE001
                 self.result.setText(f"抓拍失败：{exc}")
                 return
@@ -1690,7 +2278,25 @@ if GUI_REQUIRED:
             self.refresh()            # 抓拍可能隐式建立会话 -> 状态列/提示同步刷新
             self._show_frame(frame, cid)
 
+        def _save_captured_image(self) -> None:  # pragma: no cover - Qt
+            """DEC-121：保存本次抓拍帧（原始数据，不套显示旋转/预览算法）。"""
+            from application.presentation.components.frame_export import (
+                save_frame_files,
+            )
+            if self._frame is None:
+                self.result.setText("请先「单次抓拍」一帧，再保存图片")
+                return
+            saved = save_frame_files(self._frame, self,
+                                     camera_id=self._frame_camera,
+                                     title="保存抓拍图片")
+            if saved:
+                self.result.setText("已保存：" + "；".join(saved))
+
         def _show_frame(self, frame, cid: str) -> None:  # pragma: no cover - Qt
+            self.btn_save_img.setEnabled(
+                frame is not None and (frame.color is not None
+                                       or frame.depth is not None))
+            self._apply_display_rotation(cid)
             depth = frame.depth.data if frame.depth is not None else None
             color = frame.color.data if frame.color is not None else None
 
@@ -1730,6 +2336,11 @@ if GUI_REQUIRED:
         # ---------- 预览 (算法只作用于这里) ----------
         def _render_preview(self) -> None:  # pragma: no cover - Qt
             """按当前面板参数重画**显示预览**。原始帧 (``self._frame``) 全程只读。"""
+            self._apply_display_rotation(getattr(self._frame, "camera_id", None))
+            # 几何变换可能刚改过：多边形/ROI 按新变换重新换算显示（DEC-120）
+            if self._frame is not None:
+                self._set_polygon(self._polygon)
+                self._set_roi(self._roi)
             frame = self._frame
             if frame is None:
                 self._last_result = None
@@ -1782,6 +2393,10 @@ if GUI_REQUIRED:
             """来源标注要**按适配器/服务/协议**说清楚, 不能一律写成 FakeCamera 或 V2。"""
             offline = getattr(self.ctx.stack, "profile", "") == "offline"
             service = str(getattr(frame, "service_id", "") or "")
+            if service == "file-import" or str(
+                    getattr(frame, "capture_id", "") or "").startswith("import-"):
+                return ("本地文件导入（非实时；深度比例/内参来自 _depth.json 或手工指定，"
+                        "不冒充现场采集）")
             if "s100" in service:
                 adapter = self.state.adapter(str(frame.camera_id))
                 protocol = str(getattr(adapter, "protocol", "") or "")
@@ -1833,6 +2448,19 @@ if GUI_REQUIRED:
             self.det_list.setVisible(has)
             self.det_hint.setVisible(not has)
             self.btn_det_del.setEnabled(has)
+            combo = getattr(self, "det_overwrite", None)
+            if combo is not None:
+                keep = combo.currentData()
+                combo.blockSignals(True)
+                try:
+                    combo.clear()
+                    combo.addItem("（新建）", None)
+                    for det in items:
+                        combo.addItem(det.detection_id, det.detection_id)
+                    idx = combo.findData(keep)
+                    combo.setCurrentIndex(idx if idx >= 0 else 0)
+                finally:
+                    combo.blockSignals(False)
 
         def _detection_snapshot(self, vision) -> dict:  # pragma: no cover - Qt
             """保存那一刻的配置快照：**判定**用的流水线参数 + **显示**用的图像算法参数
@@ -1883,15 +2511,32 @@ if GUI_REQUIRED:
             if not pipeline_ref:
                 self.result.setText("当前栈没有可用的检测流水线，无法另存检测")
                 return
-            default_id = f"检测-{cid}"
-            name, ok = _ask_text(self, "另存为视觉检测",
-                                 "检测名称（执行方案 vision.run 步骤将引用它）:", default_id)
-            if not ok or not name.strip():
-                return
-            det_id = name.strip()
-            if store.find(det_id) is not None and not _confirm(
-                    self, "覆盖检测", f"检测 {det_id!r} 已存在，用当前设置覆盖它？"):
-                return
+            target = None
+            combo = getattr(self, "det_overwrite", None)
+            if combo is not None:
+                target = combo.currentData()
+            if target:
+                # 下拉里明确选了要覆盖的检测：不再要求输入同名
+                det_id = str(target).strip()
+                if store.find(det_id) is None:
+                    self.result.setText(
+                        f"选择的检测 {det_id!r} 已不存在，请刷新后重试或选「（新建）」")
+                    return
+                if not _confirm(self, "覆盖检测",
+                                f"用当前设置覆盖检测 {det_id!r}？"):
+                    return
+            else:
+                default_id = f"检测-{cid}"
+                name, ok = _ask_text(
+                    self, "另存为视觉检测",
+                    "检测名称（执行方案 vision.run 步骤将引用它）:", default_id)
+                if not ok or not name.strip():
+                    return
+                det_id = name.strip()
+                if store.find(det_id) is not None and not _confirm(
+                        self, "覆盖检测",
+                        f"检测 {det_id!r} 已存在，用当前设置覆盖它？"):
+                    return
             det = VisionDetection(
                 detection_id=det_id, label=det_id, camera_ref=cid,
                 pipeline_ref=pipeline_ref, params=self._detection_snapshot(vision),

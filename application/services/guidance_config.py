@@ -16,7 +16,10 @@ from ruamel.yaml import YAML
 
 from application.algorithms.guidance.depth_guidance import (
     CENTER_MODES,
+    DEPTH_RANGE_MODES,
     MORPH_OPS,
+    RECT_FITS,
+    RECT_MODES,
     THRESH_METHODS,
     DepthGuidanceParams,
 )
@@ -191,8 +194,33 @@ def validate(cfg: GuidanceConfig) -> list[str]:
         issues.append(f"中心方式非法: {d.center_mode!r}；可选 {CENTER_MODES}")
     if d.depth_min_mm >= d.depth_max_mm:
         issues.append(f"深度切分区间非法: {d.depth_min_mm} >= {d.depth_max_mm}")
+    # DEC-133：自动深度范围（找圆链）
+    if str(d.depth_range_mode) not in DEPTH_RANGE_MODES:
+        issues.append(f"深度范围模式非法: {d.depth_range_mode!r}；可选 {DEPTH_RANGE_MODES}")
+    for _name, _val in (("自动下限偏移", d.auto_min_offset_mm),
+                        ("自动上限偏移", d.auto_plane_offset_mm)):
+        if float(_val) < 0:
+            issues.append(f"深度{_name}不能为负")
+    if float(d.auto_plane_tol_mm) <= 0:
+        issues.append("自动深度范围·平面容差必须为正")
     if d.rect_side_length <= 0:
         issues.append("正外接矩形边长必须为正")
+    # DEC-131：矩形自动贴合参数
+    if str(d.rect_mode) not in RECT_MODES:
+        issues.append(f"矩形模式非法: {d.rect_mode!r}；可选 {RECT_MODES}")
+    if str(d.rect_fit) not in RECT_FITS:
+        issues.append(f"矩形贴合方式非法: {d.rect_fit!r}；可选 {RECT_FITS}")
+    if float(d.rect_scale) <= 0:
+        issues.append("矩形尺寸系数必须为正")
+    for _name, _val in (("外扩边距", d.rect_pad_px),
+                        ("合并间距", d.rect_merge_gap_px),
+                        ("最小边长", d.rect_min_side_px),
+                        ("最大边长", d.rect_max_side_px)):
+        if float(_val) < 0:
+            issues.append(f"矩形{_name}不能为负")
+    if float(d.rect_max_side_px) > 0 and \
+            float(d.rect_min_side_px) > float(d.rect_max_side_px):
+        issues.append("矩形最小边长不能大于最大边长")
     if d.avg_depth_diameter <= 0:
         issues.append("均值深度直径必须为正")
     if int(d.morph_kernel_size) < 1:

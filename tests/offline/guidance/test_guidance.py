@@ -25,7 +25,8 @@ from application.algorithms.guidance.offsets import (
 )
 from application.algorithms.guidance.pixel_ops import compute_pixel_xyz, pixel_to_xyz
 from application.contracts.enums import ImageSpace
-from application.contracts.frames import FrameBundle, ImageRef, Intrinsics
+from application.contracts.frames import (
+    CaptureSet, FrameBundle, FreshnessPolicy, ImageRef, Intrinsics)
 from application.services.guidance_config import (
     FineOffsetProfile,
     GuidanceConfigStore,
@@ -58,12 +59,13 @@ def _depth_with_disc(cx: int = 160, cy: int = 120, radius: int = 30,
     return depth
 
 
-def _frame(depth: np.ndarray | None = None) -> FrameBundle:
+def _frame(depth: np.ndarray | None = None,
+           camera_id: str = "ds86_01") -> FrameBundle:
     depth = _depth_with_disc() if depth is None else depth
     color = np.zeros((H, W, 3), dtype="uint8")
     return FrameBundle(
-        camera_id="ds86_01", frame_id="f1", capture_id="c1", sequence=1,
-        service_id="local", channel_id="ds86_01",
+        camera_id=camera_id, frame_id="f1", capture_id="c1", sequence=1,
+        service_id="local", channel_id=camera_id,
         color=ImageRef.from_array(color), depth=ImageRef.from_array(depth),
         depth_scale_m=SCALE,
         intrinsics=Intrinsics(fx=FX, fy=FY, cx=PPX, cy=PPY, width=W, height=H,
@@ -284,6 +286,68 @@ def test_guidance_service_requires_camera_when_no_frame(tmp_path):
     svc = GuidanceService(_store(tmp_path), camera=None, host_proxy=FakeHost())
     result = svc.detect()                              # 未给帧也未接相机
     assert not result.ok and "抓图失败" in result.message
+
+
+# ------------------------------------------------ 多相机（DEC-137：可用 D405 等）
+class FakeAdapter:
+    """最小采集适配器外形：只返回注入的帧，并记录 CaptureRequest。"""
+
+    def __init__(self, frame: FrameBundle, *, device_time: bool = True) -> None:
+        self.frame = frame
+        self.supports_device_time = device_time
+        self.requests: list = []
+
+    def capture(self, request):
+        self.requests.append(request)
+        return CaptureSet(request=request, frames={self.frame.camera_id: self.frame})
+
+
+def test_guidance_detect_uses_selected_camera_and_freshness(tmp_path):
+    """DEC-137：按 camera_id 选适配器；D405（supports_device_time=False）用
+    ALLOW_ARRIVAL_ONLY，不因"未验证曝光时间"被自己的抓拍请求打回。"""
+    host = FakeHost()
+    ds86 = FakeAdapter(_frame())
+    d405 = FakeAdapter(_frame(camera_id="d405_03"), device_time=False)
+    svc = GuidanceService(_store(tmp_path), camera=ds86, camera_id="ds86_01",
+                          cameras={"ds86_01": ds86, "d405_03": d405},
+                          host_proxy=host)
+    assert svc.camera_ids() == ["d405_03", "ds86_01"]
+
+    result = svc.detect(camera_id="d405_03")
+    assert result.ok, result.message
+    assert result.cam_xyz[2] == pytest.approx(500.0, abs=2.0)
+    assert svc.last_camera_id == "d405_03"
+    req = d405.requests[-1]
+    assert req.camera_ids == ("d405_03",)
+    assert req.freshness_policy is FreshnessPolicy.ALLOW_ARRIVAL_ONLY
+    assert ds86.requests == []                         # 没动默认相机
+
+    # 默认相机（DS86）仍要求设备时间
+    result2 = svc.detect()
+    assert result2.ok
+    req2 = ds86.requests[-1]
+    assert req2.camera_ids == ("ds86_01",)
+    assert req2.freshness_policy is FreshnessPolicy.REQUIRE_DEVICE_TIME
+
+
+def test_guidance_missing_selected_camera_reports_which_one(tmp_path):
+    """选了没有会话的相机：如实报是哪台，不悄悄退到默认相机。"""
+    ds86 = FakeAdapter(_frame())
+    svc = GuidanceService(_store(tmp_path), camera=ds86, camera_id="ds86_01",
+                          cameras={"ds86_01": ds86}, host_proxy=FakeHost())
+    result = svc.detect(camera_id="d405_99")
+    assert not result.ok
+    assert "抓图失败" in result.message and "d405_99" in result.message
+    assert ds86.requests == []
+
+
+def test_capture_frame_accepts_camera_id(tmp_path):
+    d405 = FakeAdapter(_frame(camera_id="d405_03"), device_time=False)
+    svc = GuidanceService(_store(tmp_path), camera=None, camera_id="ds86_01",
+                          cameras={"d405_03": d405}, host_proxy=FakeHost())
+    frame = svc.capture_frame(camera_id="d405_03")
+    assert frame is not None and frame.camera_id == "d405_03"
+    assert svc.last_frame is frame
 
 
 def test_extract_circles_prefers_show_then_centers():

@@ -114,6 +114,12 @@ class StepModel(BaseModel):
     # 二者可并存: 绑定方案时按方案回放路点, 未绑定则移动到本步自带的示教点。
     joint_target_ref: str | None = None
     motion_plan_ref: str | None = None
+    # robot.move_by_bolt_size（DEC-155）：全局参数螺栓直径 → 运动方案路点序号（1 起）。
+    # 键 "16"/"20"/"24"，值为该方案 waypoints 的 1-based 序号。
+    bolt_size_waypoints: dict[str, int] | None = None
+    # 可选：先执行该路点（如"先到螺栓二"），再执行按螺栓直径选中的路点。
+    # 0/None = 不设过渡路点。1-based。
+    bolt_size_via_waypoint: int | None = None
     # camera.capture
     camera_ref: str | None = None
     # vision.run

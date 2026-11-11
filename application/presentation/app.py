@@ -4,24 +4,29 @@
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Any
 
 try:  # pragma: no cover
     from PySide6.QtCore import QDateTime, Qt, QTimer
-    from PySide6.QtGui import QFont
+    from PySide6.QtGui import QFont, QKeySequence, QShortcut
     from PySide6.QtWidgets import (
-        QButtonGroup, QFrame, QHBoxLayout, QLabel, QMainWindow, QPushButton,
-        QStackedWidget, QVBoxLayout, QWidget,
+        QApplication, QButtonGroup, QFrame, QHBoxLayout, QKeySequenceEdit,
+        QLabel, QMainWindow, QPushButton, QStackedWidget, QVBoxLayout, QWidget,
     )
     GUI_REQUIRED = True
 except Exception:  # noqa: BLE001
     GUI_REQUIRED = False
     QMainWindow = object  # type: ignore[assignment]
 
+from application.bootstrap import app_paths
 from application.presentation.components import StatusPill
 from application.presentation.theme import THEME, qss, state_colors
 from application.infrastructure import logging_setup
+from application.services.runtime_config import (
+    DEFAULT_SHORTCUTS, SHORTCUT_ACTIONS, RuntimeSettingsStore,
+)
 
 _log = logging_setup.get_logger("ui.main_window")
 
@@ -136,6 +141,7 @@ if GUI_REQUIRED:
             self._clock.start()
             self._select(initial_page_for_role(self.role))
             self._refresh_status()
+            self.reload_shortcuts()   # DEC-115：全局快捷键（可配置，保存后即时重载）
             _log.info("主窗口已打开 profile=%s role=%s",
                       getattr(getattr(self.ctx, "stack", None), "profile", "?"),
                       self.role)
@@ -241,6 +247,62 @@ if GUI_REQUIRED:
                 btn.setChecked(btn.property("page_key") == key)
             self.stack_widget.setCurrentWidget(self.pages[key])
             self.refresh_all()
+
+        # ---------- 全局快捷键（DEC-115） ----------
+        def reload_shortcuts(self) -> None:
+            """按 configs/runtime/settings.yaml 的 shortcuts 重建 QShortcut。
+
+            参数配置页保存后调用本方法即时生效；文件缺失/坏值用默认键或跳过该条。
+            """
+            for sc in getattr(self, "_shortcuts", []):
+                try:
+                    sc.setEnabled(False)
+                    sc.setParent(None)
+                    sc.deleteLater()
+                except Exception:  # noqa: BLE001 - 清理失败不影响重建
+                    pass
+            self._shortcuts = []
+            shortcuts = dict(DEFAULT_SHORTCUTS)
+            try:
+                store = RuntimeSettingsStore(os.path.join(
+                    app_paths.configs_dir(), "runtime", "settings.yaml"))
+                store.load()
+                shortcuts = dict(store.settings.shortcuts)
+            except Exception as exc:  # noqa: BLE001 - 配置坏了不挡启动
+                _log.warning("读取快捷键配置失败，使用默认键：%s", exc)
+            for action, _label in SHORTCUT_ACTIONS:
+                seq_text = str(shortcuts.get(action, "") or "").strip()
+                if not seq_text:
+                    continue
+                seq = QKeySequence(seq_text)
+                if seq.isEmpty():
+                    _log.warning("快捷键 %s 的值 %r 无法解析，已跳过", action, seq_text)
+                    continue
+                sc = QShortcut(seq, self)
+                sc.setContext(Qt.ShortcutContext.WindowShortcut)
+                sc.activated.connect(lambda a=action: self._on_shortcut(a))
+                self._shortcuts.append(sc)
+
+        def _on_shortcut(self, action: str) -> None:  # pragma: no cover - Qt
+            # 在「快捷键」编辑框里录键时不触发动作（否则改键会误启动/误停）
+            if isinstance(QApplication.focusWidget(), QKeySequenceEdit):
+                return
+            if (action in ("start", "pause", "resume", "single_step")
+                    and QApplication.activeModalWidget() is not None):
+                return  # 弹窗打开时不推进流程；停止全部仍可用
+            if action == "stop_all":
+                self._global_stop()
+                return
+            if action.startswith("page_"):
+                key = action[len("page_"):]
+                nav_keys = {b.property("page_key") for b in self._group.buttons()}
+                if key in nav_keys:
+                    self._select(key)
+                return
+            workbench = self.pages.get("workbench")
+            fn = getattr(workbench, "_on_action", None)
+            if callable(fn):
+                fn("request_pause" if action == "pause" else action)
 
         # ---------- 页面 ----------
         def _build_pages(self) -> dict:

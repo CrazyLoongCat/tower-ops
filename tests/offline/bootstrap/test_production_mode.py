@@ -490,6 +490,21 @@ def test_camera_reload_of_d405_does_not_reopen_ds86(tmp_path, monkeypatch):
         stack.close()
 
 
+def test_switch_one_d405_to_usb_preserves_other_remote_channel(tmp_path):
+    from application.adapters.realsense_usb import D405UsbCamera
+    stack = build_production_stack(_req(tmp_path))
+    try:
+        stack.device_config.update_camera("d405_01", CameraEntry(
+            "d405_01", "D405-1", "realsense_usb", enabled=True, confirmed=True, serial="USB-A"))
+        stack.camera_reload("d405_01")
+        usb = stack.cameras["d405_01"]
+        assert isinstance(usb, D405UsbCamera) and usb.serial == "USB-A"
+        assert stack.cameras["d405_02"].endpoint == f"tcp://{S100_HOST}:{S100_PORT}"
+        assert not usb.status()["open"]
+    finally:
+        stack.close()
+
+
 # ---------------------------------------------------------------- 启动探测初始化（DEC-087）
 def test_initial_probe_marks_enabled_by_reachability():
     from application.bootstrap.production import initial_probe

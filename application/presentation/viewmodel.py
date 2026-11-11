@@ -357,8 +357,11 @@ class WorkbenchViewModel:
             raise RuntimeError("当前没有待确认的视觉步骤，不能调整检测圆")
         info = node.apply_manual_circle(cx, cy, radius_px, operator)
         tone = "ok" if info.get("status") == "PASS" else "warn"
+        _dia = float(info.get("diameter_mm") or 0.0)
         self._set_hint(
-            f"已按手动检测圆判定：{info.get('status')}（半径 {info.get('radius_px'):.0f}px）",
+            f"已按手动检测圆判定：{info.get('status')}"
+            f"（半径 {info.get('radius_px'):.0f}px"
+            + (f"，直径≈{_dia:.1f}mm" if _dia > 0 else "") + "）",
             tone)
         return info
 
@@ -394,8 +397,10 @@ class WorkbenchViewModel:
         node = self._layout_node()
         info = node.set_box_circle(box_index, cx, cy, radius_px, operator)
         tone = "ok" if info.get("status") == "PASS" else "warn"
+        _dia = float(info.get("diameter_mm") or 0.0)
         self._set_hint(
-            f"已按框 {int(box_index) + 1} 的圆判定：{info.get('status')}", tone)
+            f"已按框 {int(box_index) + 1} 的圆判定：{info.get('status')}"
+            + (f"（直径≈{_dia:.1f}mm）" if _dia > 0 else ""), tone)
         return info
 
     def select_step_circle(self, box_index,

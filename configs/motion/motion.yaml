@@ -163,6 +163,14 @@ plans:
           - -16.96
           - 33.706
           - -180.131
+      - mode: movej
+        pos:
+          - 123.726
+          - -131.989
+          - -31.955
+          - -16.012
+          - 33.711
+          - -180.134
   - plan_id: 取套筒位->拍照位
     desc: ''
     default_mode: movej
@@ -195,6 +203,14 @@ plans:
           - 0.0
           - 0.0
           - 0.001
+      - mode: movej
+        pos:
+          - 45.009
+          - -102.05
+          - -99.781
+          - 111.873
+          - 90.002
+          - -0.071
   - plan_id: 套筒前进100
     desc: ''
     default_mode: movej
@@ -299,7 +315,7 @@ plans:
           - 0.622
           - 1.569
           - -0.161
-  - plan_id: 测试方案
+  - plan_id: 套筒后退20
     desc: ''
     default_mode: movej
     speed: 60
@@ -307,22 +323,30 @@ plans:
     timeout: 100
     source: 本工程新建
     waypoints:
-      - mode: movej
+      - mode: socket_offset
         pos:
-          - 45.001
-          - -94.064
-          - -114.77
-          - 118.874
-          - 90.008
-          - -0.071
-      - mode: movej
+          - 0.0
+          - -20.0
+          - 0.0
+          - 0.0
+          - 0.0
+          - 0.0
+  - plan_id: 套筒后退80
+    desc: ''
+    default_mode: movej
+    speed: 60
+    blend: 12
+    timeout: 100
+    source: 本工程新建
+    waypoints:
+      - mode: socket_offset
         pos:
-          - 45.005
-          - -109.23
-          - -94.005
-          - 113.269
-          - 90.005
-          - -0.071
+          - 0.0
+          - -80.0
+          - 0.0
+          - 0.0
+          - 0.0
+          - 0.0
 paths:
   - path_id: path_to_view
     poses:
@@ -477,48 +501,4 @@ profile:
   guide_recv_timeout_s: 600
   guide_detect_timeout_s: 60
   guide_move_speed: 10
-  guide_move_blend: 0
-  global_speed: 35
-  safety:
-    collision: true
-    step_watchdog_s: 10
-    estop_io: 0
-    pause_poll_s: 0.05
-    require_reset_before_resume: true
-    preconditions:
-      require_grip_di: true
-      require_force_zero: true
-      require_climber_stowed: true
-    motion_limits:
-      max_linear_speed: 50
-      max_acc: 0
-      max_force_n: 30
-      joint_limits: []
-      workspace_box:
-        - -0.4
-        - 0.4
-        - -0.4
-        - 0.4
-        - 0.0
-        - 0.6
-    reduced_speed_zones: []
-    climber_arm_interlock: true
-    wind_interlock:
-      enabled: false
-      max_wind_speed: 10.0
-    remote_estop: true
-    fall_protection: true
-  insert:
-    creep_speed: 2.0
-    creep_step: 0.002
-    creep_max: 0.03
-    wrench_forward_s: 0.3
-    wrench_reverse_s: 0.3
-    seated_source: mainctrl
-  tighten:
-    use_force_control: false
-    hold_force_z: 15.0
-    retract_dist: 0.05
-    done_source: mainctrl
-    keep_socket: false
   source: 旧工程实测导入（RealMan_Robot/ECO65_NutTighten/configs/config.default.yaml）

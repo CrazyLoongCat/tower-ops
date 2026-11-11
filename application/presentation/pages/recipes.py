@@ -13,8 +13,9 @@
   由方法库声明，属性栏如实展示。
 - ``vision.run`` 步骤在属性栏有**「检测来源」下拉**：直接引流水线，或引「视觉调试」页
   「另存为检测」的**命名视觉检测**（二选一，选一个自动清另一个）；
-- ``vision.guided_position``（**引导定位**）步骤在属性栏：相机**只列 DS86**（`ds86_01`，
-  只认设备配置里启用的那台，DEC-034）、段选择（粗→精 / 仅粗 / 仅精）、速度（0 = 跟随引导配置）、
+- ``vision.guided_position``（**引导定位**）步骤在属性栏：相机可选**任意已启用相机通道**
+  （默认 `ds86_01`；DEC-137 起 D405 USB 等也可用，DEC-034 的"只认 DS86"已放开）、
+  段选择（粗→精 / 仅粗 / 仅精）、速度（0 = 跟随引导配置）、
   偏移上限 mm（0 = 不设上限）；执行期**每段人工确认**在作业台页弹出（DEC-033）；
 - **落盘（DEC-035）**：「保存」直接覆盖当前配方对应的文件（新建的草稿存到
   ``configs/recipes/<配方ID>.yaml``）；「另存为」弹路径对话框。配方目录里的
@@ -286,7 +287,9 @@ if GUI_REQUIRED:
             self.step_list.clear()
             for i, step in enumerate(steps, 1):
                 extra = ""
-                if step.type is NodeType.ROBOT_MOVE_JOINT:
+                if step.type is NodeType.ROBOT_MOVE_BY_BOLT_SIZE:
+                    extra = f"   ｜方案 {step.motion_plan_ref or '（未选）'}（按螺栓直径）"
+                elif step.type is NodeType.ROBOT_MOVE_JOINT:
                     if step.motion_plan_ref:
                         extra = f"   ｜方案 {step.motion_plan_ref}"
                     elif step.joint_target_ref:
@@ -446,6 +449,78 @@ if GUI_REQUIRED:
                     "（引用已登记的示教点）。方案里可含套筒偏移路点"
                     "（带符号 mm：+ 进入/前进、− 脱离/后退）——按方案顺序混排执行。"))
 
+            elif step.type is NodeType.ROBOT_MOVE_BY_BOLT_SIZE:
+                # DEC-155：按全局参数「螺栓直径」选运动方案路点（1 起）
+                plan = _fit_combo(QComboBox())
+                plan.addItem("（请选择运动方案）", None)
+                for pid in self.editor.motion_plans():
+                    plan.addItem(pid, pid)
+                idx = plan.findData(step.motion_plan_ref)
+                plan.setCurrentIndex(idx if idx >= 0 else 0)
+                plan.currentIndexChanged.connect(lambda _i, c=plan: self._edit(
+                    lambda: self.editor.set_motion_plan(step.id, c.currentData())))
+                form.addRow("运动方案", plan)
+
+                mc = getattr(getattr(self.ctx, "stack", None), "motion_config", None)
+                plan_obj = (mc.config.find_plan(step.motion_plan_ref)
+                            if mc is not None and step.motion_plan_ref else None)
+                waypoints = list(getattr(plan_obj, "waypoints", None) or [])
+
+                def _wp_label(i: int, wp) -> str:
+                    pos = "，".join(f"{float(v):g}" for v in (wp.pos or [])[:3])
+                    name = str(getattr(wp, "note", "") or "").strip()
+                    head = f"第 {i} 点" + (f"「{name}」" if name else "")
+                    return f"{head}（{wp.mode}，{pos}）"
+
+                def _wp_combo(current, *, allow_none: bool, none_text: str,
+                              on_change):
+                    c = _fit_combo(QComboBox(), chars=26)
+                    if allow_none:
+                        c.addItem(none_text, None)
+                    for i, wp in enumerate(waypoints, 1):
+                        c.addItem(_wp_label(i, wp), i)
+                    idx = c.findData(int(current) if current else None)
+                    c.setCurrentIndex(idx if idx >= 0 else 0)
+                    c.currentIndexChanged.connect(
+                        lambda _i, cc=c: on_change(cc.currentData()))
+                    return c
+
+                def _set_via(value):
+                    self._edit(lambda: self.editor.set_step_field(
+                        step.id, "bolt_size_via_waypoint",
+                        int(value) if value else None))
+
+                def _set_waypoint(size_key, value):
+                    cur = next((st for st in self.editor.model().sequence
+                                if st.id == step.id), None)
+                    mapping = dict(getattr(cur, "bolt_size_waypoints", None) or {})
+                    if value:
+                        mapping[str(size_key)] = int(value)
+                    else:
+                        mapping.pop(str(size_key), None)
+                    self._edit(lambda: self.editor.set_step_field(
+                        step.id, "bolt_size_waypoints", mapping))
+
+                if not waypoints:
+                    form.addRow("", _wrap_note(
+                        "选中的运动方案没有路点（或尚未选择方案）——先到「运动方案」页"
+                        "把螺栓一/二/三的位置登记成路点。"))
+                form.addRow("先到路点（可选）", _wp_combo(
+                    step.bolt_size_via_waypoint, allow_none=True,
+                    none_text="不设置（直接去目标路点）", on_change=_set_via))
+                mapping = dict(step.bolt_size_waypoints or {})
+                for size_key in ("16", "20", "24"):
+                    form.addRow(f"直径 {size_key}mm → 路点", _wp_combo(
+                        mapping.get(size_key), allow_none=True,
+                        none_text="（未配置）",
+                        on_change=lambda v, k=size_key: _set_waypoint(k, v)))
+                form.addRow("", _wrap_note(
+                    "下拉里就是所选运动方案的路点：第 1 点 = 「运动方案」页该方案名单里"
+                    "的第 1 个点。一般把螺栓一/二/三的位置登记为前三个路点，这里就分别选"
+                    "「16→螺栓一」「20→螺栓二」「24→螺栓三」；「先到路点」选先固定去的"
+                    "那个（如螺栓二）。运行时读全局参数的螺栓直径（就近取档），"
+                    "先走先到路点，再只走所选目标路点。"))
+
             elif step.type is NodeType.CAMERA_CAPTURE:
                 combo = self._combo(self.editor.cameras(), step.camera_ref)
                 combo.currentIndexChanged.connect(lambda _i, c=combo: self._edit(
@@ -457,8 +532,8 @@ if GUI_REQUIRED:
                 form.addRow("检测来源", self._detection_combo(step))
 
             elif step.type is NodeType.GUIDED_POSITION:
-                form.addRow("相机（DS86 深度引导）", self._guide_camera_combo(step))
-                live_note = self._guide_camera_live_note()
+                form.addRow("相机（引导定位）", self._guide_camera_combo(step))
+                live_note = self._guide_camera_live_note(step)
                 if live_note:
                     note_lbl = QLabel(live_note)
                     note_lbl.setWordWrap(True)
@@ -937,31 +1012,33 @@ if GUI_REQUIRED:
         )
 
         def _guide_camera_combo(self, step) -> QComboBox:
-            """引导定位只走 DS86（DEC-034）：下拉**只列 ds86_01**。
+            """DEC-137：引导定位可选**任意已启用相机**（默认 ds86_01，可用 D405 等）。
 
-            它没在设备配置里启用时仍保留这一项并标注原因（绝不改回 D405 等别的相机）；
-            老配方里选了非 DS86 的，把旧值也列出来并标注「校验会报错」，让用户看得见、改得掉。
+            目录里没有的引用也列出来并标注「未启用」，让用户看得见、改得掉；
+            排序把 DS86 放最前（现场默认）；目录为空时保留 ds86_01 占位项。
             """
             combo = _fit_combo(QComboBox())
-            cams = set(self.editor.cameras())
-            if GUIDANCE_CAMERA_ID in cams:
-                combo.addItem(GUIDANCE_CAMERA_ID, GUIDANCE_CAMERA_ID)
-            else:
+            cams = sorted(set(self.editor.cameras()),
+                          key=lambda c: (c != GUIDANCE_CAMERA_ID, c))
+            for cid in cams:
+                combo.addItem(cid, cid)
+            if not cams:
                 combo.addItem(f"{GUIDANCE_CAMERA_ID}（设备配置里未启用）",
                               GUIDANCE_CAMERA_ID)
-            if step.camera_ref and step.camera_ref != GUIDANCE_CAMERA_ID:
-                combo.addItem(f"{step.camera_ref}（非 DS86，校验会报错）", step.camera_ref)
+            if step.camera_ref and step.camera_ref not in cams:
+                combo.addItem(f"{step.camera_ref}（设备配置里未启用）", step.camera_ref)
             idx = combo.findData(step.camera_ref)
             combo.setCurrentIndex(idx if idx >= 0 else 0)
             combo.currentIndexChanged.connect(lambda _i, c=combo: self._edit(
                 lambda: self.editor.set_step_field(step.id, "camera_ref", c.currentData())))
             return combo
 
-        def _guide_camera_live_note(self) -> str:
-            """本次运行没打开 DS86 时提示可编辑但运行会失败（运行时如实报，不凑数）。"""
+        def _guide_camera_live_note(self, step) -> str:
+            """本次运行没打开所选相机时提示可编辑但运行会失败（运行时如实报，不凑数）。"""
             live = getattr(getattr(self.ctx, "stack", None), "cameras", None)
-            if isinstance(live, dict) and GUIDANCE_CAMERA_ID not in live:
-                return ("本次运行未打开 DS86（原因见「设备配置」页的设备状态）；"
+            cam = (getattr(step, "camera_ref", "") or GUIDANCE_CAMERA_ID)
+            if isinstance(live, dict) and cam not in live:
+                return (f"本次运行未打开相机 {cam}（原因见「设备配置」页的设备状态）；"
                         "执行方案可编辑/保存，但运行时该步骤会如实失败，"
                         "不会拿其它相机的帧凑数。")
             return ""

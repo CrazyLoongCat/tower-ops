@@ -18,13 +18,13 @@ from ruamel.yaml import YAML
 
 from application.contracts.context import VersionSnapshot
 # 引导定位的段名集合与运动方案执行器共用同一份定义（contracts 中性层，避免循环导入）。
-from application.contracts.enums import (
-    ConditionOp, GUIDANCE_CAMERA_ID, GUIDE_STAGES, NodeType)
+from application.contracts.enums import ConditionOp, GUIDE_STAGES, NodeType
 from application.domain.actions import ActionCatalog
 from application.domain.resources import MOTION_GLOBAL
 from application.contracts.targets import JointTarget
 from application.services.recipes.models import ConditionModel, RecipeModel, StepModel
 # 受保护路径单一定义在 infrastructure.config.base, 此处沿用同一份以避免两处漂移。
+from application.infrastructure.config.atomic import atomic_write, rollback
 from application.infrastructure.config.base import (
     PROTECTED_PATH_PREFIXES,
     is_protected as _is_protected,
@@ -354,6 +354,35 @@ def validate_recipe(model: RecipeModel, catalog: ReferenceCatalog) -> Validation
                 report.add("structure",
                            f"步骤 {step.id!r}(robot.move_joint) 需提供 joint_target_ref 或 motion_plan_ref",
                            step_id=step.id, field_name="joint_target_ref")
+        if step.type is NodeType.ROBOT_MOVE_BY_BOLT_SIZE:
+            # DEC-155：必须绑定运动方案，且 16/20/24 至少配一条路点映射
+            if not (step.motion_plan_ref or "").strip():
+                report.add("structure",
+                           f"步骤 {step.id!r}(robot.move_by_bolt_size) 必须选择运动方案",
+                           step_id=step.id, field_name="motion_plan_ref")
+            mapping = dict(step.bolt_size_waypoints or {})
+            if not mapping:
+                report.add("structure",
+                           f"步骤 {step.id!r} 未配置螺栓直径→路点映射（16/20/24）",
+                           step_id=step.id, field_name="bolt_size_waypoints")
+            for key, value in mapping.items():
+                if str(key) not in ("16", "20", "24"):
+                    report.add("structure",
+                               f"步骤 {step.id!r} 的螺栓直径键 {key!r} 非法（只认 16/20/24）",
+                               step_id=step.id, field_name="bolt_size_waypoints")
+                try:
+                    ok_val = int(value) >= 1
+                except (TypeError, ValueError):
+                    ok_val = False
+                if not ok_val:
+                    report.add("structure",
+                               f"步骤 {step.id!r} 的螺栓直径 {key!r} 路点序号必须 ≥1",
+                               step_id=step.id, field_name="bolt_size_waypoints")
+            via = getattr(step, "bolt_size_via_waypoint", None)
+            if via is not None and int(via) < 1:
+                report.add("structure",
+                           f"步骤 {step.id!r} 的先到路点序号必须 ≥1（或留空）",
+                           step_id=step.id, field_name="bolt_size_via_waypoint")
         if step.type is NodeType.VISION_RUN:
             # 检测来源二选一: 直接引流水线, 或引一条命名视觉检测 (不能都给/都不给)
             has_pipe = bool((step.pipeline_ref or "").strip())
@@ -444,7 +473,9 @@ def validate_recipe(model: RecipeModel, catalog: ReferenceCatalog) -> Validation
                            f"步骤 {step.id!r} 的视觉检测 {step.detection_ref!r} 引用的流水线 "
                            f"{pipe!r} 未注册",
                            step_id=step.id, field_name="detection_ref")
-        if step.type is NodeType.ROBOT_MOVE_JOINT and (step.motion_plan_ref or "").strip() \
+        if step.type in (NodeType.ROBOT_MOVE_JOINT,
+                         NodeType.ROBOT_MOVE_BY_BOLT_SIZE) \
+                and (step.motion_plan_ref or "").strip() \
                 and step.motion_plan_ref not in catalog.motion_plans:
             report.add("reference",
                        f"步骤 {step.id!r} 引用未知运动方案 {step.motion_plan_ref!r}",
@@ -485,19 +516,13 @@ def validate_recipe(model: RecipeModel, catalog: ReferenceCatalog) -> Validation
             report.add("reference", f"步骤 {step.id!r} 引用未知相机 {step.camera_ref!r}",
                        step_id=step.id, field_name="camera_ref")
         if step.type is NodeType.GUIDED_POSITION:
-            # 引导定位只走 DS86 深度引导，且只认设备配置里的那一台（DEC-034）：
-            # 不能借用 D405 等其它相机；选了非 DS86 在**校验期**就报，不留到运行期。
-            if step.camera_ref != GUIDANCE_CAMERA_ID:
+            # DEC-137：引导定位可用**任意**设备配置里已启用的相机（默认 ds86_01，
+            # D405 USB 等同一条深度引导链）；引用了未启用的相机在校验期就报。
+            if step.camera_ref not in catalog.cameras:
                 report.add("reference",
-                           f"引导定位 {step.id!r} 只能用 DS86 深度引导相机 "
-                           f"{GUIDANCE_CAMERA_ID!r}，当前 {step.camera_ref!r}"
-                           f"（不能借其它相机做引导）",
-                           step_id=step.id, field_name="camera_ref")
-            elif step.camera_ref not in catalog.cameras:
-                report.add("reference",
-                           f"引导定位 {step.id!r} 引用的 {step.camera_ref!r} 不在设备配置的"
-                           f"已启用相机里（请在设备配置页启用 DS86；未连接时执行方案仍可编辑，"
-                           f"运行时该步骤会如实失败）",
+                           f"引导定位 {step.id!r} 引用的相机 {step.camera_ref!r} 不在设备配置的"
+                           f"已启用相机里（请在设备配置页启用该相机通道；未连接时执行方案仍可"
+                           f"编辑，运行时该步骤会如实失败）",
                            step_id=step.id, field_name="camera_ref")
             ref = (getattr(step, "fine_profile_ref", None) or "").strip()
             if ref and ref not in catalog.fine_offset_profiles:
@@ -632,24 +657,6 @@ def validate_recipe(model: RecipeModel, catalog: ReferenceCatalog) -> Validation
     return report
 
 
-def atomic_write(path: str, text: str, *, backup: bool = True) -> None:
-    """临时写 -> 校验前落盘 -> 原子替换, 保留可回退备份 (02 §10)."""
-    directory = os.path.dirname(os.path.abspath(path)) or "."
-    os.makedirs(directory, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=directory, suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(text)
-            fh.flush()
-            os.fsync(fh.fileno())
-        if backup and os.path.exists(path):
-            os.replace(path, path + ".bak")
-        os.replace(tmp, path)
-    finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
-
-
 def load_recipes_dir(recipes: RecipeService, directory: str, *,
                      skip_paths: tuple[str, ...] = (),
                      log: Any = None) -> list[str]:
@@ -683,13 +690,6 @@ def load_recipes_dir(recipes: RecipeService, directory: str, *,
             continue
         out.append(rid)
     return out
-
-
-def rollback(path: str) -> None:
-    """回退到 .bak (原子写保留的上一版本)."""
-    bak = path + ".bak"
-    if os.path.exists(bak):
-        os.replace(bak, path)
 
 
 def preview_import(manifest: dict, base_dir: str) -> dict[str, Any]:

@@ -265,6 +265,7 @@ if GUI_REQUIRED:
             self.vm = ctx.vm
             self._autotick = True
             self._shown_frame_id = None
+            self._shown_frame = None
             # DEC-051: 相机页签状态。页签 = 设备配置里已启用的相机；有新抓拍/新
             # 待确认视觉步骤时自动切到对应相机，操作员手动点过页签后不再自动抢。
             self._channel_sig = None
@@ -274,6 +275,10 @@ if GUI_REQUIRED:
             self._step_dialog: StepConfirmDialog | None = None
             self._guide_dialog: GuideConfirmDialog | None = None
             self._guide_prompt_key = None
+            # DEC-119：相机卡片可弹出独立窗口（与操作台抓拍弹窗同一组件）
+            self._image_popup = None
+            self._popup_open = False
+            self._popup_owner = None
             self._build()
             from PySide6.QtCore import QTimer
             self._timer = QTimer(self)
@@ -444,9 +449,23 @@ if GUI_REQUIRED:
             self.delete_target_btn.setEnabled(False)
             self.delete_target_btn.setToolTip("删除选中的框；若选中的是框内的圆，只删圆")
             self.delete_target_btn.clicked.connect(self._on_delete_target)
+            self.btn_save_img = QPushButton("保存图片")
+            self.btn_save_img.setEnabled(False)
+            self.btn_save_img.setToolTip(
+                "保存当前抓拍帧：彩色 PNG + 原始深度（npy / 16位PNG / JSON 元数据）+ 伪彩预览；"
+                "均不含显示旋转与预览算法")
+            self.btn_save_img.clicked.connect(self._save_shown_image)
+            self.btn_popup = QPushButton("弹窗")
+            self.btn_popup.setCheckable(True)
+            self.btn_popup.setToolTip("把相机通道画面弹出为独立窗口（成像与画框/画圆不变）；再点一次关闭")
+            self.btn_popup.toggled.connect(
+                lambda checked: self.toggle_image_popup(bool(checked),
+                                                        owner="workbench"))
             bar.addWidget(self.draw_box_btn)
             bar.addWidget(self.draw_circle_btn)
             bar.addWidget(self.delete_target_btn)
+            bar.addWidget(self.btn_save_img)
+            bar.addWidget(self.btn_popup)
             bar.addStretch(1)
             self.gallery.add_toolbar(bar)
 
@@ -474,6 +493,66 @@ if GUI_REQUIRED:
             self.image_time = self.gallery.time
             card.body().addWidget(self.gallery, 1)
             return card
+
+        def _save_shown_image(self) -> None:  # pragma: no cover - Qt
+            """DEC-121：保存当前抓拍帧（原始数据，不套显示旋转/预览算法）。"""
+            from application.presentation.components.frame_export import (
+                save_frame_files,
+            )
+            frame = getattr(self, "_shown_frame", None)
+            if frame is None:
+                return
+            saved = save_frame_files(frame, self, title="保存抓拍图片")
+            if saved:
+                self.image_caption.setText("已保存：" + "；".join(saved))
+
+        # ---------- 相机卡片弹窗（DEC-119，与操作台共用同一组件） ----------
+        def _ensure_image_popup(self):
+            popup = getattr(self, "_image_popup", None)
+            if popup is None:
+                from application.presentation.components.capture_popup import (
+                    CapturePopup,
+                )
+                popup = CapturePopup(self.image_card, self._image_slot,
+                                     parent=self.window(),
+                                     title="相机通道 · 抓拍与检测圆")
+                popup.finished.connect(self._on_image_popup_finished)
+                self._image_popup = popup
+            return popup
+
+        def _on_image_popup_finished(self, *_a) -> None:  # pragma: no cover - Qt
+            self._popup_open = False
+            self._popup_owner = None
+            btn = getattr(self, "btn_popup", None)
+            if btn is not None:
+                btn.blockSignals(True)
+                btn.setChecked(False)
+                btn.blockSignals(False)
+
+        def toggle_image_popup(self, show: bool | None = None, *,
+                               owner: str | None = None) -> bool:
+            """打开/关闭相机卡片弹窗；返回打开后的状态。owner 记录谁打开的。"""
+            popup = self._ensure_image_popup()
+            want = (not self._popup_open) if show is None else bool(show)
+            if want:
+                popup.attach()
+                popup.show()
+                popup.raise_()
+                self._popup_open = True
+                self._popup_owner = owner
+            else:
+                popup.close()
+                self._popup_open = False
+                self._popup_owner = None
+            btn = getattr(self, "btn_popup", None)
+            if btn is not None:
+                btn.blockSignals(True)
+                btn.setChecked(bool(want))
+                btn.blockSignals(False)
+            return want
+
+        def image_popup_open(self) -> bool:
+            return bool(getattr(self, "_popup_open", False))
 
         # ---------- 交互 ----------
         def _on_action(self, key: str) -> None:  # pragma: no cover - Qt
@@ -627,9 +706,11 @@ if GUI_REQUIRED:
                 dlg.set_prompt(prompt, circle_available=bool(circle.get("available")))
                 dlg.adjustSize()
             if circle.get("available") and circle.get("manual"):
+                _dia = float(circle.get("diameter_mm") or 0.0)
                 dlg.set_status_text(
                     f"当前判定（手动圆）：{circle.get('status')} · "
-                    f"{circle.get('reason') or ''}")
+                    f"{circle.get('reason') or ''}"
+                    + (f" · 直径≈{_dia:.1f}mm" if _dia > 0 else ""))
             if not dlg.isVisible():
                 dlg.show()
 
@@ -641,10 +722,12 @@ if GUI_REQUIRED:
                 self.vm._set_hint(f"手动检测圆未应用: {exc}", "bad")  # noqa: SLF001
                 return
             if self._step_dialog is not None:
+                _dia = float(info.get("diameter_mm") or 0.0)
                 self._step_dialog.set_status_text(
                     f"已按手动圆判定：{info.get('status')} · "
                     f"圆心 ({info.get('cx'):.0f}, {info.get('cy'):.0f}) "
-                    f"半径 {info.get('radius_px'):.0f}px")
+                    f"半径 {info.get('radius_px'):.0f}px"
+                    + (f" · 直径≈{_dia:.1f}mm" if _dia > 0 else ""))
             win = self.window()
             if hasattr(win, "refresh_all"):
                 win.refresh_all()
@@ -783,6 +866,15 @@ if GUI_REQUIRED:
             if guide_frame is not None:
                 frame = guide_frame
 
+            # DEC-119：DS86 相机画面按显示旋转 270°（只转显示，框/圆坐标仍是原图）
+            self._shown_frame = frame
+            self.btn_save_img.setEnabled(
+                frame is not None and (getattr(frame, "color", None) is not None
+                                       or getattr(frame, "depth", None) is not None))
+            shown_cam = (getattr(frame, "camera_id", None) if frame is not None
+                         else camera_id)
+            self.image_view.set_display_rotation(
+                270 if str(shown_cam or "").lower().startswith("ds86") else 0)
             color = getattr(frame, "color", None) if frame is not None else None
             if frame is not None:
                 key = (getattr(frame, "camera_id", None),
@@ -1124,6 +1216,15 @@ if GUI_REQUIRED:
                 self._timer.stop()
             except Exception:  # noqa: BLE001
                 pass
+            popup = getattr(self, "_image_popup", None)
+            if popup is not None:
+                try:
+                    popup.close()
+                    popup.deleteLater()
+                except Exception:  # noqa: BLE001
+                    pass
+                self._image_popup = None
+                self._popup_open = False
             dlg = self._step_dialog
             if dlg is not None:
                 try:

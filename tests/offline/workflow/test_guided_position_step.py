@@ -4,7 +4,8 @@
 - 步骤 = **一个**独立步骤，内部粗→精依次执行；段选择只能是 (coarse, fine) 的非空子集；
 - 每段**人工确认**后才按 Bolt 工具系 [X,0,Z] 偏移；拒绝/检测失败/超上限 → 步骤失败；
 - 与手动「引导定位」按钮同一套闸（运动闸 + 已连接）；离线 NullMotionArm 一律拒绝；
-- 引导服务只支持 DS86：步骤相机与引导服务绑定不一致时明确失败，不偷换。
+- 相机按步骤 ``camera_ref`` 选（DEC-137：任意已启用相机，如 D405 USB；默认 DS86），
+  没有可用会话时明确失败，不偷换相机。
 硬件一律 NOT_RUN（用例只用 FakeArm/FakeGuidance，不接真机）。
 """
 from __future__ import annotations
@@ -32,11 +33,15 @@ RECIPE = "configs/recipes/ds86_two_station_example.yaml"
 # ---------------------------------------------------------------- 假硬件（不接真机）
 class FakeGuidance:
     def __init__(self, *, coarse=(10.0, -5.0), fine=(1.0, 0.5), ok=True,
-                 message="") -> None:
+                 message="", cameras=("ds86_01",)) -> None:
         self.coarse, self.fine = coarse, fine
         self.ok, self.message = ok, message
         self.camera_id = "ds86_01"
+        self._camera_ids = list(cameras)
         self.calls = 0
+
+    def camera_ids(self):
+        return list(self._camera_ids)
 
     def detect(self) -> GuidanceResult:
         self.calls += 1
@@ -179,16 +184,13 @@ def test_editor_add_step_defaults_to_ds86():
     assert editor.validate().ok
 
 
-# ------------------------------------------------- 相机引用以设备配置为准 (DEC-034)
-def test_guided_step_rejects_non_ds86_even_if_in_catalog():
-    """选了 D405 等其它相机：**校验期**就报「只能用 DS86」，不留到运行期。"""
+# ------------------------------------------------- 相机引用以设备配置为准 (DEC-034/137)
+def test_guided_step_accepts_other_enabled_camera():
+    """DEC-137：D405 等其它**已启用相机**也能做引导（不再在校验期报「只能用 DS86」）。"""
     report = validate_recipe(_recipe(
         {"id": "g", "type": "vision.guided_position", "camera_ref": "d405_01"}),
         _catalog(("d405_01", "ds86_01")))
-    assert not report.ok
-    entry = next(e for e in report.entries if e.get("field_name") == "camera_ref")
-    assert "只能用 DS86" in entry["message"]
-    assert "d405_01" in entry["message"]
+    assert report.ok, report.entries
 
 
 def test_guided_step_ds86_must_be_enabled_in_device_config():
@@ -201,16 +203,14 @@ def test_guided_step_ds86_must_be_enabled_in_device_config():
     assert "已启用" in entry["message"] and "ds86_01" in entry["message"]
 
 
-def test_editor_guided_default_keeps_ds86_without_live_catalog():
-    """没接 DS86 也能建步骤/保存；错误只落在校验报告（运行时再如实失败）。"""
+def test_editor_guided_default_falls_back_to_enabled_camera():
+    """DS86 未启用时默认值退到目录里第一台已启用相机（如 D405），不留必然失败的默认值。"""
     editor = RecipeEditor(_RecipeService(_catalog(("d405_01",))))
     editor.new_recipe("r")
     sid = editor.add_step(NodeType.GUIDED_POSITION)
     step = next(s for s in editor.model.sequence if s.id == sid)
-    assert step.camera_ref == "ds86_01"            # 绝不退到 D405
-    report = editor.validate()
-    assert not report.ok
-    assert any(e.get("field_name") == "camera_ref" for e in report.entries)
+    assert step.camera_ref == "d405_01"
+    assert editor.validate().ok
 
 
 def test_offline_catalog_follows_enabled_device_config(tmp_path):
@@ -403,14 +403,43 @@ def test_node_offline_null_arm_is_refused(tmp_path):
     stack.close()
 
 
-def test_node_camera_mismatch_refused(tmp_path, monkeypatch):
+def test_node_camera_without_session_refused(tmp_path, monkeypatch):
+    """DEC-137：步骤选了没有可用会话的相机 → 如实失败（不偷换默认相机）。"""
     _gate_on(monkeypatch)
     stack = _stack(tmp_path)
-    runner = _runner(tmp_path)                # 引导服务 camera_id=ds86_01
+    runner = _runner(tmp_path)                # 本次只有 ds86_01 有会话
     node = _node(runner, stack, camera_ref="d405_01")
     assert node.update() is Status.FAILURE
+    assert "没有可用会话" in (node.failure_reason or "")
     assert "ds86_01" in (node.failure_reason or "")
     assert "d405_01" in (node.failure_reason or "")
+    stack.close()
+
+
+class CameraRecordingGuidance(FakeGuidance):
+    """记录每次检测用的相机（DEC-137 多相机透传）。"""
+
+    def __init__(self) -> None:
+        super().__init__(cameras=("ds86_01", "d405_03"))
+        self.seen_cameras: list = []
+
+    def detect(self, *, camera_id=None, fine_profile_ref=None) -> GuidanceResult:
+        self.seen_cameras.append(camera_id)
+        return super().detect()
+
+
+def test_node_passes_selected_camera_to_guidance(tmp_path, monkeypatch):
+    """步骤选 D405 → 粗/精两次检测都带 camera_id=d405_03（D405 也能做粗/精定位）。"""
+    _gate_on(monkeypatch)
+    stack = _stack(tmp_path)
+    guide = CameraRecordingGuidance()
+    runner = _runner(tmp_path, guidance=guide)
+    node = _node(runner, stack, camera_ref="d405_03")
+
+    assert _drive(node) is Status.SUCCESS
+    assert guide.seen_cameras == ["d405_03", "d405_03"]
+    assert [o[0] for o in runner.arm.offsets] == [
+        (0.010, 0.0, -0.005, 0.0, 0.0, 0.0), (0.001, 0.0, 0.0005, 0.0, 0.0, 0.0)]
     stack.close()
 
 

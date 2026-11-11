@@ -68,19 +68,15 @@ def import_legacy_motion(data: dict[str, Any]) -> MotionConfig:
     frames = data.get("frames") or {}
     guide = data.get("guide") or {}
     motion = data.get("motion") or {}
-    globals_ = data.get("global_speed") or {}
+    # DEC-138：旧工程的 global_speed / safety / insert / tighten / guide.move_blend
+    # 从未接线，导入时**不再读取**（旧文件里有这些键也不报错，一律忽略）。
     profile = RobotMotionProfile(
         active_tool=str(frames.get("active_tool", "Bolt") or "Bolt"),
         active_work=str(frames.get("active_work", "Ganta") or "Ganta"),
         speed_cap=int(motion.get("speed_cap", 50)),
         point_timeout_s=int(motion.get("point_timeout_s", 30)),
         guide_recv_timeout_s=int(guide.get("recv_timeout_s", 600)),
-        guide_move_speed=int(guide.get("move_speed", 10)),
-        guide_move_blend=int(guide.get("move_blend", 0)),
-        global_speed=int(globals_.get("value", 35)),
-        safety=dict(data.get("safety") or {}),
-        insert=dict(data.get("insert") or {}),
-        tighten=dict(data.get("tighten") or {}))
+        guide_move_speed=int(guide.get("move_speed", 10)))
 
     return MotionConfig(plans=plans, paths=paths, sockets=sockets, profile=profile)
 

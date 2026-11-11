@@ -179,7 +179,9 @@ def compile_recipe(recipe: RecipeModel, run_ctx: RunContext, executor,
                            vision_step_ref=vision_ref)
         if step.type is NodeType.VISION_RUN:
             last_vision, scene_dirty = step.id, False
-        elif step.type in (NodeType.CAMERA_CAPTURE, NodeType.ROBOT_MOVE_JOINT,
+        elif step.type in (NodeType.CAMERA_CAPTURE,
+                           NodeType.ROBOT_MOVE_JOINT,
+                           NodeType.ROBOT_MOVE_BY_BOLT_SIZE,
                            NodeType.MECHANISM_ACTION, NodeType.CUSTOM_CALL,
                            NodeType.SUBFLOW, NodeType.REPEAT,
                            NodeType.PARALLEL_GROUP,

@@ -67,6 +67,9 @@ def _build_stack(args) -> "object":
         # 导致离线界面的粗定位与精定位数值完全相同、找圆调试参数也与现场不一致。
         guidance_config_path=os.path.join(app_paths.configs_dir(), "motion",
                                           "guidance.yaml"),
+        # 操作台计算配置落在 <应用根>/configs/operations/（DEC-148）。
+        operation_config_path=os.path.join(app_paths.configs_dir(), "operations",
+                                           "manual_ops.yaml"),
         # 命名视觉检测落在 <应用根>/configs/vision/（「视觉调试」页「另存为检测」维护）。
         vision_detections_path=os.path.join(app_paths.configs_dir(), "vision",
                                             "detections.yaml"),
@@ -203,6 +206,8 @@ def run_real(args) -> int:
                                             "motion.yaml"),
             guidance_config_path=os.path.join(app_paths.configs_dir(), "motion",
                                               "guidance.yaml"),
+            operation_config_path=os.path.join(app_paths.configs_dir(), "operations",
+                                               "manual_ops.yaml"),
             vision_detections_path=os.path.join(app_paths.configs_dir(), "vision",
                                                 "detections.yaml"),
         )

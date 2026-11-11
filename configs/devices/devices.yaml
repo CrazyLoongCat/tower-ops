@@ -164,7 +164,7 @@ cameras:
     serial: ''
     service_id: ''
     channel_id: cam1
-    host: 192.168.3.115
+    host: 192.168.3.20
     port: 5555
     stream_url: ''
     capture_profile: ''
@@ -179,7 +179,7 @@ cameras:
     serial: ''
     service_id: ''
     channel_id: cam2
-    host: 192.168.3.115
+    host: 192.168.3.20
     port: 5555
     stream_url: ''
     capture_profile: ''

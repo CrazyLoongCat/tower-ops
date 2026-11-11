@@ -1,8 +1,11 @@
-"""引导定位服务：DS86 深度引导在**本程序内闭环**（不再连旧的视觉程序）。
+"""引导定位服务：深度引导在**本程序内闭环**（不再连旧的视觉程序）。
+
+默认用 DS86 抓图；DEC-137 起只要设备配置里启用了相机通道（如 D405 USB），
+粗/精定位都可以指定该相机（抓图→深度引导→找圆→偏差 的算法链与相机无关）。
 
 流程（与旧工程一致，只是不再跨进程/跨机器）：
 
-    抓 DS86 帧 → run_depth_guidance(深度切分…轮廓…正外接矩形)
+    抓相机帧 → run_depth_guidance(深度切分…轮廓…正外接矩形)
       → 每个矩形经 **cp38 宿主**找圆 → 取圆心
       → point_depth_xyz(圆心均值深度) → 相机系 XYZ(mm)
       → 按轴映射算粗/精偏差 (x,z) mm
@@ -12,8 +15,9 @@
 """
 from __future__ import annotations
 
+import math
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Optional, Sequence, Tuple
 
 from application.algorithms.circle.params import CircleParams
@@ -26,7 +30,7 @@ from application.algorithms.guidance.depth_guidance import (
 from application.algorithms.guidance.offsets import compute_robot_offsets
 from application.algorithms.guidance.pixel_ops import compute_pixel_xyz
 from application.contracts.enums import GUIDANCE_CAMERA_ID
-from application.contracts.frames import CaptureRequest
+from application.contracts.frames import CaptureRequest, FreshnessPolicy
 from application.infrastructure import logging_setup
 from application.services.guidance_config import GuidanceConfigStore
 
@@ -34,7 +38,9 @@ from application.services.guidance_config import GuidanceConfigStore
 # 里程碑仍走注入的 ``log`` 回调（INFO，进文件+事件库）。
 _log_dbg = logging_setup.get_logger("guidance")
 
-# 只走 DS86（DEC-034）；常量定义在中性层 enums，配方校验/编辑器共用同一份
+# 默认相机（DEC-034 的向后兼容默认值）：配方校验/编辑器默认值共用同一常量。
+# DEC-137：引导定位不再**只认** DS86 —— 只要设备配置里启用了相机通道，
+# 粗/精定位都可以用（例如 D405 USB）；`camera_id` 为空时仍回退这台默认相机。
 DEFAULT_CAMERA_ID = GUIDANCE_CAMERA_ID
 
 
@@ -44,12 +50,14 @@ class GuidanceError(RuntimeError):
 
 @dataclass(frozen=True)
 class CircleHit:
-    """一个检出圆（全图坐标）。"""
+    """一个检出圆（全图坐标）。``diameter_mm`` 由找圆链按圆心深度换算（DEC-147，
+    0 表示深度/内参不可用、如实不给假数）。"""
 
     rect_index: int
     cx: float
     cy: float
     radius: float
+    diameter_mm: float = 0.0
 
 
 @dataclass
@@ -153,30 +161,72 @@ def intrinsics_to_dict(intrinsics: Any) -> dict:
             "width": int(intrinsics.width), "height": int(intrinsics.height)}
 
 
+def circle_diameter_mm(radius_px: float, depth_mm: float, intr: dict) -> float:
+    """圆半径(px)+圆心处所用深度(mm)+内参 → 物理直径(mm)，DEC-147。
+
+    ``直径 = 2·r_px·Z / √(fx·fy)``（Z 即找圆+均值深度流程里圆心处实际用的深度）。
+    参数缺失/非正时返回 0.0——如实不给假数，由界面决定是否显示。
+    """
+    try:
+        fx = float(intr.get("fx") or 0.0)
+        fy = float(intr.get("fy") or 0.0)
+        r = float(radius_px)
+        z = float(depth_mm)
+    except (TypeError, ValueError, AttributeError):
+        return 0.0
+    if r <= 0 or z <= 0 or fx <= 0 or fy <= 0:
+        return 0.0
+    return 2.0 * r * z / math.sqrt(fx * fy)
+
+
 class GuidanceService:
     """本地深度引导：抓图 → 找圆 → 相机 XYZ → 粗/精偏差。"""
 
     def __init__(self, config_store: GuidanceConfigStore, *,
                  camera: Any = None, host_proxy: Any = None,
                  camera_id: str = DEFAULT_CAMERA_ID,
+                 cameras: dict[str, Any] | None = None,
                  log=None) -> None:
         self.config_store = config_store
-        self.camera = camera                 # DS86 适配器（Fake 或 real）
+        self.camera = camera                 # 默认相机适配器（Fake 或 real）
         self.host_proxy = host_proxy         # cp38 圆宿主代理（Circle38Proxy）
         self.camera_id = camera_id
+        # DEC-137：多相机支持 —— 生产栈传入**同一个**（热重载就地更新的）cameras 字典；
+        # 检测时按 camera_id 取当时的适配器，不把"启动时那一台"焊死。
+        self.cameras = cameras if cameras is not None else {}
+        self.last_camera_id = camera_id
         # DEC-084：最近一次引导实际使用的帧（作业台右卡在粗/精定位确认时显示圆）
         self.last_frame: Any = None
         self._log = log or (lambda _m: None)
 
+    # ---------- 相机选择 ----------
+    def camera_ids(self) -> list[str]:
+        """当前**有采集会话**的相机 ID（设备配置已启用且本次运行连接成功）。"""
+        ids = set(self.cameras)
+        if self.camera is not None and self.camera_id:
+            ids.add(self.camera_id)
+        return sorted(ids)
+
+    def _adapter(self, camera_id: str | None) -> tuple[str, Any]:
+        """返回 ``(camera_id, adapter)``；adapter 缺失时由调用方如实报错。"""
+        cid = str(camera_id or self.camera_id or DEFAULT_CAMERA_ID)
+        adapter = self.cameras.get(cid) if self.cameras else None
+        if adapter is None and cid == self.camera_id:
+            adapter = self.camera      # 兼容只注入单台适配器（离线/测试）的旧用法
+        return cid, adapter
+
     # ---------- 主入口 ----------
     def detect(self, frame: Any = None, *, prefer_center: bool = False,
-               fine_profile_ref: str | None = None) -> GuidanceResult:
+               fine_profile_ref: str | None = None,
+               camera_id: str | None = None) -> GuidanceResult:
         """检测 → 相机 XYZ → 粗/精偏差。
 
         ``prefer_center=True``：在多个有效圆中选**离相机光心最近**的那个（用于精定位——
         粗定位已把选定的目标移到视野中心，重新检测时不能被"第一个自动圆"带偏）。
         ``fine_profile_ref``：选用哪一套**精定位偏移参数**（DEC-065；空=默认套，
         未知=如实失败，不悄悄回退）。
+        ``camera_id``（DEC-137）：用哪台相机抓图（空=引导服务默认相机）。
+        深度引导/找圆链路与相机无关，任何提供 color+depth+内参 的相机通道都可用。
         默认 False 保持旧程序行为：按顺序取第一个深度有效的圆。
         """
         cfg = self.config_store.config
@@ -184,13 +234,14 @@ class GuidanceService:
         if params is None:
             return GuidanceResult(
                 False, f"精定位参数套 {fine_profile_ref!r} 不存在（请到「参数配置」页检查）")
+        cid = str(camera_id or self.camera_id or DEFAULT_CAMERA_ID)
         t_all = time.monotonic()
         t0 = time.monotonic()
         if frame is None:
             # DEC-058 排查：抓图是最容易卡住的一步，先落一行再进 SDK
-            _log_dbg.debug("[Guide] 开始抓图 相机=%s", self.camera_id)
+            _log_dbg.debug("[Guide] 开始抓图 相机=%s", cid)
         try:
-            frame = frame if frame is not None else self._capture()
+            frame = frame if frame is not None else self._capture(cid)
         except Exception as exc:  # noqa: BLE001
             _log_dbg.debug("[Guide] 抓图失败 用时 %.2fs 原因=%s",
                            time.monotonic() - t0, exc)
@@ -200,8 +251,10 @@ class GuidanceService:
                        getattr(getattr(getattr(frame, "depth", None), "data", None),
                                "shape", None))
         if frame is None:
-            return GuidanceResult(False, "未取到 DS86 帧（相机未连接或抓拍失败）")
+            return GuidanceResult(
+                False, f"未取到相机 {cid!r} 的帧（未连接或抓拍失败）")
         self.last_frame = frame
+        self.last_camera_id = str(getattr(frame, "camera_id", "") or cid)
 
         depth = getattr(getattr(frame, "depth", None), "data", None)
         scale = getattr(frame, "depth_scale_m", None)
@@ -277,26 +330,31 @@ class GuidanceService:
                 "总命中 %d）", hit.cx, hit.cy, hit.radius,
                 float(best_key) ** 0.5 if best_key is not None else -1.0,
                 len(hits), len(hits))
+        # DEC-147 修复：CircleHit 是 frozen dataclass，用 replace 生成带直径的新实例
+        hit = replace(hit, diameter_mm=circle_diameter_mm(
+            hit.radius, used, intr_dict))
         coarse, fine = compute_robot_offsets(xyz, params)
         _log_dbg.debug("[Guide] 检测完成 总用时 %.2fs", time.monotonic() - t_all)
         self._log(f"[Guide] 相机系 XYZ=({xyz[0]:.2f}, {xyz[1]:.2f}, {xyz[2]:.0f})mm "
-                  f"深度={used:.0f}mm → 粗={coarse} 精={fine}")
+                  f"深度={used:.0f}mm 直径≈{hit.diameter_mm:.1f}mm → 粗={coarse} 精={fine}")
         return GuidanceResult(True, "检测成功", cam_xyz=tuple(xyz), coarse=coarse,
                               fine=fine, circle=hit, rects=rects,
                               debug_image=res.get("debug_image"),
                               depth_mm=res.get("depth_mm"), used_depth_mm=used)
 
     def detect_fine(self, frame: Any = None,
-                    fine_profile_ref: str | None = None) -> GuidanceResult:
+                    fine_profile_ref: str | None = None,
+                    camera_id: str | None = None) -> GuidanceResult:
         """精定位检测：重新抓图找圆，但在多个圆中**优先离光心最近**的有效圆。
 
         粗定位已把操作员选定的圆移到相机中心附近；若仍取第一个自动圆，多圆场景会
         按"原始自动选择的圆"继续移动（用户 2026-10-22 实测反馈）。选不到中心附近的
         仍然按距离排序取最近的有效圆；没有有效圆则如实失败。
         ``fine_profile_ref``：该步骤选用的精定位参数套（DEC-065）。
+        ``camera_id``（DEC-137）：用哪台相机抓图（空=默认相机）。
         """
         return self.detect(frame=frame, prefer_center=True,
-                           fine_profile_ref=fine_profile_ref)
+                           fine_profile_ref=fine_profile_ref, camera_id=camera_id)
 
     def detect_with_circle(self, *, frame: Any, cx: float, cy: float,
                            radius_px: float = 0.0,
@@ -318,6 +376,7 @@ class GuidanceService:
         if frame is None:
             return GuidanceResult(False, "缺少视觉步骤帧，不能按手动圆心定位")
         self.last_frame = frame
+        self.last_camera_id = str(getattr(frame, "camera_id", "") or self.camera_id)
         try:
             cx, cy = float(cx), float(cy)
         except (TypeError, ValueError):
@@ -343,39 +402,50 @@ class GuidanceService:
                     circle=hit, depth_mm=depth_mm)
             xyz = (fallback[0], fallback[1], fallback[2])
             used = float(fallback[2])
+        hit = replace(hit, diameter_mm=circle_diameter_mm(
+            hit.radius, used, intr_dict))
         coarse, fine = compute_robot_offsets(xyz, params)
         _log_dbg.debug("[Guide] 按视觉步骤圆心检测 完成 用时 %.2fs",
                        time.monotonic() - t0)
         self._log(f"[Guide] 视觉步骤圆心 ({cx:.0f},{cy:.0f}) 相机系 XYZ="
                   f"({xyz[0]:.2f}, {xyz[1]:.2f}, {xyz[2]:.0f})mm 深度={used:.0f}mm "
-                  f"→ 粗={coarse} 精={fine}")
+                  f"直径≈{hit.diameter_mm:.1f}mm → 粗={coarse} 精={fine}")
         return GuidanceResult(True, "按视觉步骤圆心检测成功", cam_xyz=tuple(xyz),
                               coarse=coarse, fine=fine, circle=hit, rects=[],
                               depth_mm=depth_mm, used_depth_mm=used)
 
     # ---------- 内部 ----------
-    def capture_frame(self) -> Any:
+    def capture_frame(self, camera_id: str | None = None) -> Any:
         """公开抓图（「运动方案」页单次视觉检测用，DEC-109）。
 
         只抓一帧，不做深度引导/找圆；结果同时记到 ``last_frame``。
+        ``camera_id``（DEC-137）：页面选择的引导相机（空=默认相机）。
         抓图异常按 ``GuidanceError`` 抛出，由调用方如实展示。
         """
-        frame = self._capture()
+        frame = self._capture(camera_id)
         if frame is not None:
             self.last_frame = frame
         return frame
 
-    def _capture(self) -> Any:
-        if self.camera is None:
-            raise GuidanceError("未接入相机（无法抓图）")
-        cs = self.camera.capture(CaptureRequest(
-            camera_ids=(self.camera_id,), request_id="guidance",
-            step_id="guidance", allow_partial=True))
-        err = cs.errors.get(self.camera_id)
+    def _capture(self, camera_id: str | None = None) -> Any:
+        cid, camera = self._adapter(camera_id)
+        if camera is None:
+            raise GuidanceError(
+                f"相机 {cid!r} 没有可用的采集会话（设备配置未启用或本次运行未连接）")
+        # DEC-137：D405 USB 只能给"到达即可"的帧（未验证曝光时间），
+        # 用适配器自报能力决定新鲜度策略；DS86/S100 仍要求设备时间。
+        policy = (FreshnessPolicy.ALLOW_ARRIVAL_ONLY
+                  if not getattr(camera, "supports_device_time", True)
+                  else FreshnessPolicy.REQUIRE_DEVICE_TIME)
+        cs = camera.capture(CaptureRequest(
+            camera_ids=(cid,), request_id="guidance",
+            step_id="guidance", allow_partial=True, freshness_policy=policy))
+        err = cs.errors.get(cid)
         if err:
             raise GuidanceError(err)
-        frame = cs.frames.get(self.camera_id)
+        frame = cs.frames.get(cid)
         if frame is not None:
+            self.last_camera_id = cid
             self.last_frame = frame       # DEC-084：供作业台右卡显示引导画面/圆
         return frame
 
@@ -419,4 +489,4 @@ class GuidanceService:
 
 
 __all__ = ["CircleHit", "GuidanceError", "GuidanceResult", "GuidanceService",
-           "extract_circles", "intrinsics_to_dict"]
+           "circle_diameter_mm", "extract_circles", "intrinsics_to_dict"]

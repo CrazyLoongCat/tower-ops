@@ -98,8 +98,9 @@ def test_technician_window_hides_other_nav_but_keeps_pages(win):
         assert labels == ["操作台", "日志诊断"]
         assert w2.stack_widget.currentWidget() is w2.pages["console"]
         assert set(w2.pages) == {k for _l, k in NAV_PAGES}
-        # 操作台里的跨页快捷入口也只留日志诊断（DEC-098）
-        assert set(w2.pages["console"].manual_buttons) == {"logs"}
+        # 操作台常用手工操作（DEC-148）：三个弹窗式操作两角色都保留
+        assert set(w2.pages["console"].manual_buttons) == {
+            "tower_width", "bolt_size", "motion_adjust"}
     finally:
         w2.shutdown(); w2.close(); w2.deleteLater(); app.processEvents()
         stack.profile = old_profile
@@ -718,13 +719,14 @@ def test_vision_page_s100_channel_uses_s100_service_and_labels_it(tmp_path, qapp
         stack.close()
 
 
-def test_motion_page_constructs_with_two_subtabs(win):
-    """「运动方案」页：路径规划 / 路径实施 两个子 tab（编辑与调用隔离）。"""
+def test_motion_page_constructs_with_three_subtabs(win):
+    """「运动方案」页：路径规划 / 路径实施 / 手动调整 三个子 tab（编辑与调用隔离）。"""
     w, _vm, stack, app = win
     w._select("motion"); app.processEvents()
     page = w.pages["motion"]
-    assert page.tabs.count() == 2
-    assert [page.tabs.tabText(i) for i in range(2)] == ["路径规划", "路径实施"]
+    assert page.tabs.count() == 3
+    assert [page.tabs.tabText(i) for i in range(3)] == \
+        ["路径规划", "路径实施", "手动调整"]
     assert page.plan_combo.count() == len(stack.motion_config.config.plans)
 
 
@@ -749,7 +751,7 @@ def test_motion_page_lists_plans_and_waypoints(win):
 
 
 def test_motion_page_socket_waypoint_rows(win):
-    """套筒偏移行：方式可下拉到「套筒偏移」；只有 y/j2 列(带符号偏移 mm)可填，余列只读。"""
+    """套筒偏移行：方式可下拉到「套筒偏移」；前 3 列(dx/dy/dz mm)可填，后 3 列只读（DEC-139）。"""
     from PySide6.QtCore import Qt
 
     from application.services.motion_config import MotionPlan, Waypoint
@@ -761,20 +763,67 @@ def test_motion_page_socket_waypoint_rows(win):
     combo = page.wp_table.cellWidget(0, 0)
     assert combo.currentData() == "socket_offset"
     assert combo.itemText(combo.findData("socket_offset")) == "套筒偏移"
-    # 偏移(mm) 显示在 y/j2 列，且只有该列可编辑
+    # 偏移(mm) 显示在 y/j2 列；X/Y/Z 三列都可编辑，姿态列只读
     assert page.wp_table.item(0, 2).text() == "15"
-    assert bool(page.wp_table.item(0, 2).flags() & Qt.ItemFlag.ItemIsEditable)
-    assert not bool(page.wp_table.item(0, 1).flags() & Qt.ItemFlag.ItemIsEditable)
-    # 填负值（− = 脱离/后退）：其余非 Y 列保持 0 且只读
-    page.wp_table.item(0, 2).setText("-15"); app.processEvents()
-    assert page.wp_table.item(0, 1).text() == "0"
-    assert not bool(page.wp_table.item(0, 1).flags() & Qt.ItemFlag.ItemIsEditable)
-    # 表格 -> 路点 往返：带符号偏移仍在 Y 分量(mm)
+    for col in (1, 2, 3):
+        assert bool(page.wp_table.item(0, col).flags() & Qt.ItemFlag.ItemIsEditable)
+    for col in (4, 5, 6):
+        assert not bool(page.wp_table.item(0, col).flags() & Qt.ItemFlag.ItemIsEditable)
+        assert page.wp_table.item(0, col).text() == "0"
+    # X/Z 也可配置（DEC-139）：填 (5, -15, 2) mm
+    page.wp_table.item(0, 1).setText("5")
+    page.wp_table.item(0, 2).setText("-15")
+    page.wp_table.item(0, 3).setText("2"); app.processEvents()
     wp = page._row_waypoint(0)          # noqa: SLF001
-    assert wp.mode == "socket_offset" and wp.pos[1] == -15.0 and wp.pos[0] == 0.0
-    # 切换方式为点位行：其余列恢复可编辑
+    assert wp.mode == "socket_offset"
+    assert wp.pos == (5.0, -15.0, 2.0, 0.0, 0.0, 0.0)
+    # 切换方式为点位行：6 列全部恢复可编辑
     combo.setCurrentIndex(combo.findData("movej")); app.processEvents()
-    assert bool(page.wp_table.item(0, 1).flags() & Qt.ItemFlag.ItemIsEditable)
+    for col in range(1, 7):
+        assert bool(page.wp_table.item(0, col).flags() & Qt.ItemFlag.ItemIsEditable)
+
+
+def test_motion_page_manual_jog_tab_moves_bolt_axes(win, monkeypatch):
+    """DEC-139：「手动调整」tab 有 X/Y/Z 正负按钮，点动带轴/步长/速度并作废引导画面。"""
+    w, _vm, stack, app = win
+    w._select("motion"); app.processEvents()
+    page = w.pages["motion"]
+    assert page.tabs.tabText(page.tabs.count() - 1) == "手动调整"
+    seen: list[tuple] = []
+    monkeypatch.setattr(page.runner, "request_tool_jog",
+                        lambda axis, mm, speed=None: seen.append((axis, mm, speed)) or True)
+    monkeypatch.setattr(page, "_guard_motion", lambda *_a, **_k: True)
+    page.jog_step.setValue(2.5)
+    page.jog_speed.setValue(17)
+    # 离线栈机械臂未连接，刷新会把按钮置灰；点动逻辑本身由 request_tool_jog 承担。
+    for btn in page.jog_buttons.values():
+        btn.setEnabled(True)
+    page.jog_buttons[("X", +1)].click()
+    page.jog_buttons[("Y", -1)].click()
+    page.jog_buttons[("Z", +1)].click()
+    app.processEvents()
+    assert seen == [("X", 2.5, 17), ("Y", -2.5, 17), ("Z", 2.5, 17)]
+
+
+def test_motion_page_pose_view_reads_current_pose(win, monkeypatch):
+    """DEC-145：「手动调整」页的 3D 位姿示意读当前位姿，只读、未连接时清空。"""
+    w, _vm, stack, app = win
+    w._select("motion"); app.processEvents()
+    page = w.pages["motion"]
+    assert page.tabs.tabText(page.tabs.count() - 1) == "手动调整"
+    view = page.pose_view
+    pose = (0.1, -0.2, 0.3, 0.0, 0.0, 0.785)
+    monkeypatch.setattr(page.runner.arm, "connected", True, raising=False)
+    monkeypatch.setattr(page.runner.arm, "get_current_pose", lambda: pose, raising=False)
+    page._refresh_pose_view()
+    assert view.pose() == pose
+    # 离屏渲染（验证 QPainter 不异常）
+    view.resize(420, 320)
+    assert not view.grab().isNull()
+    # 未连接：清空位姿并显示提示
+    monkeypatch.setattr(page.runner.arm, "connected", False, raising=False)
+    page._refresh_pose_view()
+    assert view.pose() is None
 
 
 def test_motion_page_tool_offset_waypoint_rows(win):
@@ -844,6 +893,21 @@ def test_motion_page_visual_detect_is_local_and_does_not_need_motion_gate(win, m
     # 离线栈用 FakeCamera + 进程内 stub 圆宿主 -> 应能出结果（含相机系 XYZ 与偏差）
     assert page.kv_xyz.text().find("X=") >= 0 or "失败" in page.kv_detect.text()
     assert page.view_result.available or "未检出" in page.kv_detect.text()
+
+
+def test_motion_page_guide_camera_combo_and_start_guide_passes_camera(win, monkeypatch):
+    """DEC-137：运动方案页有「引导相机」下拉（只列本次已连接通道），粗定位带上 camera_id。"""
+    w, _vm, stack, app = win
+    w._select("motion"); app.processEvents()
+    page = w.pages["motion"]
+    page.refresh(); app.processEvents()
+    assert page.guide_camera.currentData() == "ds86_01"
+    seen: dict = {}
+    monkeypatch.setattr(page.runner, "start_guide", lambda **kw: seen.update(kw) or True)
+    monkeypatch.setattr(page, "_guard_motion", lambda *_a, **_k: True)
+    page._guide("coarse")
+    assert seen.get("camera_id") == "ds86_01"
+    assert seen.get("stages") == ("coarse",)
 
 
 def test_motion_page_teach_group_offline_is_disabled(win):
@@ -1097,6 +1161,18 @@ def test_scan_writes_the_chosen_serial(win):
     dlg.deleteLater()
 
 
+def test_usb_scan_binding_requires_reconfirmation(win):
+    w, _vm, _stack, app = win
+    dlg, _stub = _camera_dialog(app, protocol="realsense_usb",
+                                 stub=_ScanStub(_outcome(_cam("USB-1", name="D405", ip="")), pick=0))
+    dlg._widgets["confirmed"].setChecked(True)
+    dlg._scan_devices()
+    assert dlg.values()["serial"] == "USB-1"
+    assert not dlg.values()["confirmed"]
+    assert dlg.btn_scan.isVisible() or not dlg.btn_scan.isHidden()
+    dlg.deleteLater()
+
+
 def test_scan_lists_occupied_devices_and_warns_if_picked(win):
     """被占用的设备**照样列出来**并标 [占用]（旧程序也只是标注），挑它要提醒先关占它的程序。"""
     w, _vm, _stack, app = win
@@ -1227,13 +1303,16 @@ def test_vision_layout_three_columns_with_images_stacked(win):
     from application.presentation.components import SectionTitle
     assert page.meta.findChild(SectionTitle).text() == "帧元数据"
 
-    # 主图内: 彩色在上、深度在下 (装在 QVBoxLayout 里, 不是 QHBoxLayout)
+    # 主图内: 彩色在上、深度在下（DEC-129 起用两行等拉伸的 QGridLayout，保证等宽等高）
+    from PySide6.QtWidgets import QGridLayout
     color_cell, depth_cell = page.view_color.parentWidget(), page.view_depth.parentWidget()
     assert color_cell is not depth_cell
-    stack = next(L for L in page.mid.findChildren(QVBoxLayout)
-                 if L.indexOf(color_cell) >= 0)
-    assert stack.indexOf(color_cell) == 0 and stack.indexOf(depth_cell) == 1, \
-        "彩色与深度要上下叠放"
+    grid = next(L for L in page.mid.findChildren(QGridLayout)
+                if L.indexOf(color_cell) >= 0)
+    assert grid.getItemPosition(grid.indexOf(color_cell))[:2] == (0, 0)
+    assert grid.getItemPosition(grid.indexOf(depth_cell))[:2] == (1, 0), \
+        "彩色与深度要上下叠放（且两行等拉伸）"
+    assert grid.rowStretch(0) == grid.rowStretch(1) == 1
 
 
 def test_vision_algo_panel_covers_every_param_key_and_makes_none_up(win):
@@ -1584,30 +1663,51 @@ def test_vision_seg_panel_widgets_and_defaults(win):
     assert "运行一次" in text and "vision.run" in text
 
 
-def test_vision_geometry_transform_blocks_draw_and_run_once(win, monkeypatch):
-    """几何变换生效时**原始帧坐标**与预览不再对齐 -> 拒绝绘制/分割/运行一次并给出说明。"""
+def test_vision_geometry_transform_allows_draw_and_run_once(win, monkeypatch):
+    """DEC-120：几何变换（镜像/旋转）不再阻止绘制/分割/运行一次。
+
+    多边形/ROI 按**原始帧坐标**保存，画在预览上时自动换算；结果叠加再换算回预览。
+    """
     page, stack, app = _vision(win)
     _capture("ds86_01", stack, page, app)
     _stub_segmenter(page, monkeypatch)
-    page._set_polygon([[100, 100], [500, 100], [500, 400], [100, 400]])
 
-    page._widgets["hflip"][0].setChecked(True); app.processEvents()
-    # 一点「绘制多边形」就被挡回，按钮不保持选中
-    page.btn_draw_poly.setChecked(True); page._seg_mode("polygon"); app.processEvents()
-    assert "几何变换" in page.result.text()
-    assert not page.btn_draw_poly.isChecked()
-    assert page.view_color.annotation_mode() is None
+    # 预览启用「水平镜像 + 顺时针 90°」
+    page._widgets["hflip"][0].setChecked(True)
+    rotate = page._widgets["rotate"][0]
+    rotate.setCurrentIndex(rotate.findData(90))
+    app.processEvents()
+    assert page._blocked_by_geometry() is None
 
+    # 绘制不再被拦，按钮保持选中
+    page.btn_draw_poly.setChecked(True)
+    page._seg_mode("polygon"); app.processEvents()
+    assert page.view_color.annotation_mode() == "polygon"
+    assert page.btn_draw_poly.isChecked()
+
+    # 在预览上画四边形 -> 内部保存原始帧坐标，正反变换可往返
+    preview_pts = [(40.0, 30.0), (120.0, 35.0), (118.0, 90.0), (45.0, 88.0)]
+    page._on_polygon_drawn(preview_pts)
+    assert len(page._polygon) == 4
+    for (px, py), (ox, oy) in zip(preview_pts, page._polygon):
+        rx, ry = page._orig_to_preview_pt(ox, oy)
+        assert abs(rx - px) < 1e-6 and abs(ry - py) < 1e-6
+        bx, by = page._preview_to_orig_pt(px, py)
+        assert abs(bx - ox) < 1e-6 and abs(by - oy) < 1e-6
+
+    # ROI 同样换算：预览画框 -> 原始坐标 -> 再回预览应还原
+    page._on_roi_drawn(20.0, 15.0, 140.0, 100.0)
+    assert page._roi is not None
+    mapped = page._orig_to_preview_roi(page._roi)
+    assert abs(mapped[0] - 20.0) < 1e-6 and abs(mapped[1] - 15.0) < 1e-6
+    assert abs(mapped[2] - 140.0) < 1e-6 and abs(mapped[3] - 100.0) < 1e-6
+
+    # 深度分割与运行一次都能跑（坐标用原始帧）
     page._run_depth_seg(); app.processEvents()
-    assert "几何变换" in page.result.text()
-    page._run_once(); app.processEvents()
-    assert "几何变换" in page.result.text()
-    assert getattr(page, "_seg_result", None) is None      # 被拒 -> 不产生结果
-
-    # 恢复默认后可正常跑
-    page._widgets["hflip"][0].setChecked(False); app.processEvents()
+    assert "深度分割完成" in page.result.text()
     page._run_once(); app.processEvents()
     assert "运行一次完成" in page.result.text()
+    assert getattr(page, "_seg_result", None) is not None
 
 
 def test_vision_run_once_runs_real_algorithm_path_on_current_frame(win, monkeypatch):
@@ -1900,17 +2000,27 @@ def test_workbench_recent_event_time_is_beijing(win):
 # 右栏第三个页签「找圆调试」，与「图像算法」「视觉分割」共用同一主图与同一帧。
 def test_vision_right_tabs_include_circle_debug_as_third_page(win):
     page, _stack, _app = _vision(win)
-    assert page.right_tabs.count() == 3
-    assert [page.right_tabs.tabText(i) for i in range(3)] == [
-        "图像算法", "视觉分割", "找圆调试"]
+    assert page.right_tabs.count() == 4
+    assert [page.right_tabs.tabText(i) for i in range(4)] == [
+        "图像算法", "视觉分割", "找圆调试", "棱线测量"]
     assert page.algo is page.right_tabs.widget(0)      # 原有两页不动
     assert page.seg is page.right_tabs.widget(1)
     assert page.circle is page.right_tabs.widget(2)
+    assert page.edge is page.right_tabs.widget(3)      # DEC-144 棱线测量
     # 参数控件齐全（深度引导 + 找圆两组）且都有悬停说明
-    for key in ("stage", "depth_min_mm", "thresh_method", "morph_op",
+    for key in ("stage", "depth_min_mm", "depth_max_mm", "depth_range_mode",
+                "auto_min_offset_mm", "auto_plane_offset_mm", "auto_plane_tol_mm",
+                "thresh_method", "morph_op",
+                "rect_mode", "rect_fit", "rect_scale", "rect_pad_px",
+                "rect_min_side_px", "rect_max_side_px", "rect_merge_gap_px",
                 "rect_side_length", "circle_type", "min_radius", "max_radius"):
         assert key in page._circle_widgets
         assert page._circle_widgets[key].toolTip()
+    # 棱线测量页签：参数齐全且都有悬停说明（DEC-144）
+    for key in ("tol_mm", "open_kernel", "scan", "min_span", "line_thr_mm",
+                "depth_min_mm", "depth_max_mm", "min_width_mm", "max_width_mm"):
+        assert key in page._edge_widgets
+        assert page._edge_widgets[key].toolTip()
 
 
 def test_vision_circle_debug_needs_a_captured_frame_first(win):
@@ -2165,8 +2275,18 @@ def test_settings_page_categories_and_fine_profiles(win):
     w._select("settings"); app.processEvents()
     page = w.pages["settings"]
     titles = [lb.text() for lb in page.findChildren(QLabel)]
-    for t in ("运动全局参数", "视觉引导参数", "精定位偏移参数", "运行 / 日志参数"):
+    # DEC-115：原「视觉引导参数」块已替换为「快捷键」配置；
+    # DEC-148：运动全局参数改名「全局参数」，并含杆塔宽度/螺栓直径两组
+    for t in ("全局参数", "快捷键", "精定位偏移参数", "运行 / 日志参数"):
         assert t in titles
+    assert "视觉引导参数" not in titles
+    from PySide6.QtWidgets import QGroupBox
+    groups = [g.title() for g in page.body.findChildren(QGroupBox)]
+    # DEC-151：全局参数里是「计算值」两个数值，而不是算法参数组
+    assert any("计算值" in t for t in groups), groups
+    labels = [lb.text() for lb in page.body.findChildren(QLabel)]
+    assert any("杆塔宽度(mm)" == t for t in labels), labels
+    assert any("螺栓直径(mm)" == t for t in labels), labels
     cfg = stack.motion.guidance.config_store.config
     assert page.guidance_store is not None
     cfg.fine_profiles.append(FineOffsetProfile(
@@ -2344,3 +2464,488 @@ def test_motion_guide_stale_frame_with_scheme_blocks(win, monkeypatch):
     page._guide("fine")
     assert not started
     assert warns and "已过期" in warns[0]
+
+
+# ---------------------------------------------------------------- DEC-115 全局快捷键
+def test_settings_shortcuts_card_replaces_guidance_form(win):
+    """参数配置页：原「视觉引导参数」块改为「快捷键」；每个动作一个按键编辑框。"""
+    from PySide6.QtWidgets import QLabel
+
+    from application.services.runtime_config import SHORTCUT_ACTIONS
+
+    w, _vm, _stack, app = win
+    w._select("settings"); app.processEvents()
+    page = w.pages["settings"]
+    assert not hasattr(page, "_guidance_form")
+    titles = [lb.text() for lb in page.body.findChildren(QLabel)]
+    assert "快捷键" in titles and "视觉引导参数" not in titles
+    edits = page._shortcut_edits
+    assert set(edits) == {key for key, _label in SHORTCUT_ACTIONS}
+    assert edits["stop_all"].keySequence().toString() == "F12"
+    assert edits["start"].keySequence().toString() == "F5"
+
+
+def test_settings_shortcuts_save_applies_immediately(win, monkeypatch, tmp_path):
+    """改键并保存：写入 settings.yaml，主窗口快捷键立即重载（不需重启）。"""
+    from PySide6.QtGui import QKeySequence
+
+    from application.services.runtime_config import RuntimeSettingsStore
+
+    import application.presentation.app as app_mod
+
+    w, _vm, _stack, app = win
+    w._select("settings"); app.processEvents()
+    page = w.pages["settings"]
+    # 让「页面保存」与「主窗口重载」读同一个临时配置目录（正常部署里本就相同）
+    (tmp_path / "runtime").mkdir(exist_ok=True)
+    page.runtime_store = RuntimeSettingsStore(str(tmp_path / "runtime" / "settings.yaml"))
+    page.runtime_store.load()
+    page._rebuild(); app.processEvents()
+    monkeypatch.setattr(app_mod.app_paths, "configs_dir", lambda: str(tmp_path))
+    # 只验证快捷键落盘：不写仓库里的 motion/guidance 活配置
+    monkeypatch.setattr(page.motion_store, "save", lambda: None)
+    monkeypatch.setattr(page.guidance_store, "save", lambda: None)
+
+    page._shortcut_edits["start"].setKeySequence(QKeySequence("Ctrl+F5"))
+    page._save()
+    assert "已保存" in page.status.text()
+    saved = RuntimeSettingsStore(str(tmp_path / "runtime" / "settings.yaml")).load()
+    assert saved.shortcuts["start"] == "Ctrl+F5"
+    seqs = {sc.key().toString() for sc in w._shortcuts}
+    assert "Ctrl+F5" in seqs
+
+
+def test_settings_shortcut_duplicate_is_rejected(win, monkeypatch, tmp_path):
+    """同一按键绑两个动作 -> 保存被拒，不落盘。"""
+    from PySide6.QtGui import QKeySequence
+
+    import application.presentation.pages.settings as settings_mod
+    from application.services.runtime_config import RuntimeSettingsStore
+
+    w, _vm, _stack, app = win
+    w._select("settings"); app.processEvents()
+    page = w.pages["settings"]
+    page.runtime_store = RuntimeSettingsStore(str(tmp_path / "settings.yaml"))
+    page.runtime_store.load()
+    page._rebuild(); app.processEvents()
+    monkeypatch.setattr(page.motion_store, "save", lambda: None)
+    monkeypatch.setattr(page.guidance_store, "save", lambda: None)
+    warned = []
+    monkeypatch.setattr(settings_mod.QMessageBox, "warning",
+                        lambda *a, **k: warned.append(a))
+    page._shortcut_edits["pause"].setKeySequence(QKeySequence("F5"))  # 与启动重复
+    page._save()
+    assert warned and "重复" in str(warned[0])
+    assert not (tmp_path / "settings.yaml").exists()
+
+
+def test_main_window_default_shortcuts_and_mapping(win, monkeypatch):
+    """主窗口按默认配置装好快捷键；触发时页面切换/流程动作走同一入口。"""
+    w, _vm, _stack, app = win
+    seqs = {sc.key().toString() for sc in w._shortcuts}
+    for want in ("F12", "F5", "F6", "F7", "F8",
+                 "Ctrl+1", "Ctrl+2", "Ctrl+3", "Ctrl+4", "Ctrl+5"):
+        assert want in seqs
+    w._on_shortcut("page_console")
+    assert w.stack_widget.currentWidget() is w.pages["console"]
+    calls = []
+    monkeypatch.setattr(w.pages["workbench"], "_on_action",
+                        lambda key: calls.append(key))
+    for action in ("start", "pause", "resume", "single_step"):
+        w._on_shortcut(action)
+    assert calls == ["start", "request_pause", "resume", "single_step"]
+
+
+# ---------------------------------------------------------------- DEC-116 引导确认跨线程修复
+def test_motion_guide_confirm_is_marshaled_to_gui_thread(win, monkeypatch):
+    """引导线程请求确认：弹窗必须在 GUI 线程执行（跨线程 QMessageBox 会崩）。"""
+    import threading
+    import time
+
+    w, _vm, _stack, app = win
+    page = w.pages["motion"]
+    seen = []
+
+    def fake_box(title, message, options):
+        seen.append(threading.get_ident() == threading.main_thread().ident)
+        return options[0]
+
+    monkeypatch.setattr(page, "_confirm_box", fake_box)
+
+    # GUI 线程直接调用：立即本地执行
+    assert page._confirm("引导定位", "测试", ["是", "否"]) == "是"
+
+    # 工作线程调用：经信号排队回 GUI 线程，主线程跑事件循环取结果
+    result = {}
+    t = threading.Thread(target=lambda: result.setdefault(
+        "v", page._confirm("引导定位", "测试", ["是", "否"])))
+    t.start()
+    deadline = time.time() + 10
+    while t.is_alive() and time.time() < deadline:
+        app.processEvents()
+        time.sleep(0.01)
+    t.join(1)
+    assert result.get("v") == "是"
+    assert seen == [True, True]
+
+
+# ---------------------------------------------------------------- DEC-118 引导画框/画圆
+def test_motion_guide_speed_defaults_to_profile(win):
+    """引导速度初值 = 参数配置里的「引导移动速度」（此前被夹成 1%，几乎不动）。"""
+    w, _vm, stack, app = win
+    w._select("motion"); app.processEvents()
+    page = w.pages["motion"]
+    want = max(1, min(100, int(
+        stack.motion_config.config.profile.guide_move_speed or 10)))
+    assert page.guide_speed.value() == want
+    assert page.guide_speed.value() > 1
+
+
+def test_motion_guide_drawing_box_and_circle_lands_in_layout(win):
+    """组件只发信号：页面必须把画出的框/圆落进本地布局，粗/精定位才用得到。"""
+    from types import SimpleNamespace
+
+    w, _vm, _stack, app = win
+    w._select("motion"); app.processEvents()
+    page = w.pages["motion"]
+    page._guide_frame = SimpleNamespace(color=SimpleNamespace(data=None))
+    page._guide_frame_valid = True
+    page.view_result.set_layout([])
+    page._set_guide_draw_buttons(True)      # 正常流程里由「单次视觉检测」_apply_guide_frame 开启
+
+    page.view_result.box_requested.emit(10, 10, 110, 110)
+    boxes = page.view_result.boxes()
+    assert len(boxes) == 1 and boxes[0]["circle"] is None
+
+    page.view_result.circle_drawn.emit(0, 60, 60, 20)
+    boxes = page.view_result.boxes()
+    assert boxes[0]["circle"] == {"cx": 60.0, "cy": 60.0, "radius_px": 20.0}
+    circle, idx = page._selected_guide_circle()
+    assert idx == 0 and circle["radius_px"] == 20.0
+
+
+def test_motion_guide_drawing_blocked_when_frame_stale(win):
+    """画面过期（机械臂移动过）时不允许再画框/画圆，避免用旧画面定位。"""
+    from types import SimpleNamespace
+
+    w, _vm, _stack, app = win
+    w._select("motion"); app.processEvents()
+    page = w.pages["motion"]
+    page._guide_frame = SimpleNamespace(color=SimpleNamespace(data=None))
+    page._guide_frame_valid = False
+    page.view_result.set_layout([])
+    page.view_result.box_requested.emit(10, 10, 110, 110)
+    assert page.view_result.boxes() == []
+    assert "过期" in page.guide_status.text()
+
+
+# ---------------------------------------------------------------- DEC-119 显示旋转 + 弹窗
+def test_ds86_display_rotation_270_everywhere(win):
+    """DS86 画面按显示旋转 270°：作业台右卡、运动页引导、视觉调试（按通道）。"""
+    w, _vm, _stack, app = win
+    # 运动方案引导（固定 DS86）
+    w._select("motion"); app.processEvents()
+    motion = w.pages["motion"]
+    assert motion.view_result.display_rotation() == 270
+    # 视觉调试：DS86 -> 270，其它相机 -> 0
+    vision = w.pages["vision"]
+    vision._apply_display_rotation("ds86_01")
+    assert vision.view_color.display_rotation() == 270
+    assert vision.view_depth.display_rotation() == 270
+    vision._apply_display_rotation("d405_01")
+    assert vision.view_color.display_rotation() == 0
+    assert vision.view_depth.display_rotation() == 0
+    # 作业台：显示 DS86 抓拍帧时旋转 270
+    w._select("workbench"); app.processEvents()
+    page = w.pages["workbench"]
+    page.vm.current_frames = lambda: {}
+    page.vm.current_frame = lambda: _bundle("ds86_01", "f-rot")
+    page._sync_image_card(); app.processEvents()
+    assert page.image_view.display_rotation() == 270
+
+
+def test_rotated_view_keeps_scene_coordinates(win):
+    """显示旋转只转视角：场景坐标仍是原图像素（鼠标点按自动换算回原图）。"""
+    from application.presentation.components.target_layout_view import (
+        TargetLayoutImageView,
+    )
+    w, _vm, _stack, app = win
+    view = TargetLayoutImageView("测试")
+    view.resize(400, 400)
+    import numpy as np
+    view.show_array(np.zeros((40, 60, 3), dtype="uint8"), kind="color")
+    view.set_display_rotation(270)
+    app.processEvents()
+    assert view.image_size.width() == 60 and view.image_size.height() == 40
+    # 旋转后显示宽高互换：场景矩形映射回视口后高度应大于宽度
+    br = view.view.mapToScene(view.view.viewport().rect()).boundingRect()
+    assert br.height() > br.width()
+    view.deleteLater()
+
+
+def test_workbench_popup_toggle_moves_card_out_and_back(win):
+    w, _vm, _stack, app = win
+    w._select("workbench"); app.processEvents()
+    page = w.pages["workbench"]
+    page.btn_popup.click(); app.processEvents()
+    assert page.image_popup_open()
+    popup = page._ensure_image_popup()
+    assert popup.isVisible()
+    assert page.image_card.parent() is popup
+    page.btn_popup.click(); app.processEvents()
+    assert not page.image_popup_open()
+    assert not popup.isVisible()
+    assert page.image_card.parent() is page
+
+
+def test_motion_guide_popup_toggle(win):
+    w, _vm, _stack, app = win
+    w._select("motion"); app.processEvents()
+    page = w.pages["motion"]
+    page.btn_popup.click(); app.processEvents()
+    popup = page._ensure_image_popup()
+    assert popup.isVisible()
+    assert page.image_card.parent() is popup
+    page.btn_popup.click(); app.processEvents()
+    assert not popup.isVisible()
+    assert page.image_card.parent() is not popup      # 已放回运动方案页布局
+
+
+# ---------------------------------------------------------------- DEC-121 抓帧保存图片
+def test_save_frame_files_writes_color_and_depth(tmp_path, monkeypatch, win):
+    """DEC-122：一次保存彩色图 + 深度（原始 .npy + 伪彩 PNG），尺寸=原图。"""
+    import json
+
+    import numpy as np
+    from PySide6.QtGui import QImage
+
+    from application.presentation.components import frame_export
+
+    target = tmp_path / "shot.png"
+    monkeypatch.setattr(frame_export.QFileDialog, "getSaveFileName",
+                        staticmethod(lambda *a, **k: (str(target), "")))
+    frame = _bundle("ds86_01", "f-save")
+    saved = frame_export.save_frame_files(frame, None, camera_id="ds86_01")
+    assert str(target) in saved and target.exists()
+    depth_npy = tmp_path / "shot_depth.npy"
+    depth16 = tmp_path / "shot_depth16.png"
+    depth_meta = tmp_path / "shot_depth.json"
+    depth_png = tmp_path / "shot_depth.png"          # 伪彩预览
+    for path in (depth_npy, depth16, depth_meta, depth_png):
+        assert path.exists()
+    assert set(saved) == {str(target), str(depth_npy), str(depth16),
+                          str(depth_meta), str(depth_png)}
+    img = QImage(str(target))
+    assert (img.width(), img.height()) == (320, 240)      # 彩色原图（未旋转）
+    depth = np.load(depth_npy)
+    assert depth.shape == (240, 320) and depth.dtype == np.uint16
+    # DEC-123：16 位无损 PNG，像素值=原始深度值（1000），可直接线下读
+    d16 = QImage(str(depth16))
+    assert d16.format() == QImage.Format.Format_Grayscale16
+    assert (d16.width(), d16.height()) == (320, 240)
+    raw = bytes(d16.constBits())
+    assert int.from_bytes(raw[0:2], "little") == 1000     # 像素值=原始深度
+    meta = json.loads(depth_meta.read_text(encoding="utf-8"))
+    assert meta["depth_scale_m"] == 0.001 and meta["width"] == 320
+    assert meta["height"] == 240 and meta["dtype"] == "uint16"
+    dimg = QImage(str(depth_png))
+    assert (dimg.width(), dimg.height()) == (320, 240)
+
+
+def test_capture_points_have_save_image_buttons(win, monkeypatch, tmp_path):
+    """作业台/运动引导/视觉调试的抓帧位置都有「保存图片」，且能落盘。"""
+    import application.presentation.components.frame_export as fe
+
+    w, _vm, _stack, app = win
+    out = {"n": 0}
+
+    def fake_dialog(*_a, **_k):
+        out["n"] += 1
+        return str(tmp_path / f"shot_{out['n']}.png"), ""
+
+    monkeypatch.setattr(fe.QFileDialog, "getSaveFileName", staticmethod(fake_dialog))
+
+    # 作业台相机卡片
+    w._select("workbench"); app.processEvents()
+    page = w.pages["workbench"]
+    page.vm.current_frames = lambda: {}
+    page.vm.current_frame = lambda: _bundle("ds86_01", "f-save-wb")
+    page._sync_image_card(); app.processEvents()
+    assert page.btn_save_img.isEnabled()
+    page.btn_save_img.click(); app.processEvents()
+    assert (tmp_path / "shot_1.png").exists()
+    assert (tmp_path / "shot_1_depth.npy").exists()
+    assert (tmp_path / "shot_1_depth16.png").exists()
+    assert (tmp_path / "shot_1_depth.json").exists()
+    assert (tmp_path / "shot_1_depth.png").exists()
+
+    # 运动方案引导画面
+    from types import SimpleNamespace
+    w._select("motion"); app.processEvents()
+    motion = w.pages["motion"]
+    motion._apply_guide_frame(_bundle("ds86_01", "f-save-motion"),
+                              SimpleNamespace(message="", boxes=[], selected=None))
+    assert motion.btn_save_img.isEnabled()
+    motion.btn_save_img.click(); app.processEvents()
+    assert (tmp_path / "shot_2.png").exists()
+    assert (tmp_path / "shot_2_depth.npy").exists()
+    assert (tmp_path / "shot_2_depth16.png").exists()
+
+    # 视觉调试单次抓拍
+    w._select("vision"); app.processEvents()
+    vision = w.pages["vision"]
+    vision._frame = _bundle("ds86_01", "f-save-vision")
+    vision._frame_camera = "ds86_01"
+    vision.btn_save_img.setEnabled(True)
+    vision.btn_save_img.click(); app.processEvents()
+    assert (tmp_path / "shot_3.png").exists()
+    assert (tmp_path / "shot_3_depth16.png").exists()
+    assert (tmp_path / "shot_3_depth.json").exists()
+
+
+# ---------------------------------------------------------------- DEC-124 引导偏移上限
+def test_motion_guide_passes_profile_offset_limit(win, monkeypatch):
+    """手动粗/精定位把参数配置里的「引导单段最大偏移」传给 runner。"""
+    w, _vm, stack, app = win
+    w._select("motion"); app.processEvents()
+    page = w.pages["motion"]
+    calls = []
+    monkeypatch.setattr(page, "_guard_motion", lambda *a: True)
+    monkeypatch.setattr(page.runner, "start_guide",
+                        lambda **kw: calls.append(kw) or True)
+    page._guide("coarse")
+    assert calls and calls[0]["stages"] == ("coarse",)
+    want = float(getattr(stack.motion_config.config.profile,
+                         "guide_max_offset_mm", 50.0) or 0.0)
+    assert calls[0]["max_offset_mm"] == want
+    assert want > 0
+
+
+# ---------------------------------------------------------------- DEC-126 载入本地帧 + 深度取点
+def _write_import_set(tmp_path):
+    import json
+
+    import numpy as np
+
+    h, w = 240, 320
+    yy, xx = np.mgrid[0:h, 0:w]
+    depth = np.zeros((h, w), dtype="uint16")
+    depth[np.hypot(xx - 160, yy - 120) < 30] = 500
+    color = np.zeros((h, w, 3), dtype="uint8")
+    color[...] = (30, 30, 30)
+    import cv2
+    cv2.circle(color, (160, 120), 28, (230, 230, 230), 3)
+    base = tmp_path / "ds86_01_local"
+    cv2.imwrite(str(base) + ".png", color[:, :, ::-1])
+    np.save(str(base) + "_depth.npy", depth)
+    (tmp_path / "ds86_01_local_depth.json").write_text(json.dumps({
+        "camera_id": "ds86_01", "width": w, "height": h, "dtype": "uint16",
+        "depth_scale_m": 0.001,
+        "intrinsics": {"fx": 200.0, "fy": 200.0, "cx": 160.0, "cy": 120.0,
+                       "width": w, "height": h, "space": "depth"},
+    }, ensure_ascii=False), encoding="utf-8")
+    return str(base) + ".png"
+
+
+def test_vision_loads_local_frame_and_depth_click_readout(win, monkeypatch, tmp_path):
+    """载入四件套 -> 显示同一帧；深度图点击按显示旋转换算回原始坐标取深度/XYZ。"""
+    from PySide6.QtWidgets import QFileDialog
+
+    w, _vm, _stack, app = win
+    path = _write_import_set(tmp_path)
+    monkeypatch.setattr(QFileDialog, "getOpenFileName",
+                        staticmethod(lambda *a, **k: (path, "")))
+    w._select("vision"); app.processEvents()
+    page = w.pages["vision"]
+    page._load_local_images(); app.processEvents()
+    assert page._frame is not None
+    assert page._frame.camera_id == "ds86_01"
+    assert page.view_color.available and page.view_depth.available
+    assert "已载入本地帧" in page.result.text()
+    assert page.btn_save_img.isEnabled()
+
+    # 显示旋转 270（DS86）：原始光心(160,120) -> 显示 (120, 159)
+    assert page.view_depth.display_rotation() == 270
+    page.view_depth.clicked.emit(120.0, 159.0)
+    app.processEvents()
+    text = page.depth_probe.text()
+    assert "(160,120)" in text and "500" in text and "mm" in text
+    assert "相机 XYZ" in text
+
+
+# ---------------------------------------------------------------- DEC-129 主图等宽 + 弹窗
+def test_vision_color_and_depth_views_equal_size_policy(win):
+    """彩色/深度两格同宽同高：都 Expanding + 同一最小高度（修复彩色被挤成窄条）。"""
+    from PySide6.QtWidgets import QSizePolicy
+
+    w, _vm, _stack, app = win
+    w._select("vision"); app.processEvents()
+    page = w.pages["vision"]
+    for view in (page.view_color, page.view_depth):
+        assert view.sizePolicy().horizontalPolicy() == QSizePolicy.Policy.Expanding
+        assert view.sizePolicy().verticalPolicy() == QSizePolicy.Policy.Expanding
+        assert view.minimumHeight() == 200
+
+
+def test_vision_main_image_popup_toggle(win):
+    """弹窗可放大；彩色/深度在弹窗内仍等宽（行高差 ≤2px）。"""
+    w, _vm, _stack, app = win
+    w._select("vision"); app.processEvents()
+    page = w.pages["vision"]
+    page.btn_image_popup.click(); app.processEvents()
+    popup = page._ensure_image_popup()
+    assert popup.isVisible()
+    assert page.mid.parent() is popup
+    assert popup.minimumWidth() == 640            # 有最小尺寸、可自由缩放
+    popup.resize(1500, 1200); app.processEvents()
+    assert page.view_color.width() == page.view_depth.width()
+    assert abs(page.view_color.height() - page.view_depth.height()) <= 2
+    page.btn_image_popup.click(); app.processEvents()
+    assert not popup.isVisible()
+    assert page.mid.parent() is not popup
+
+
+# ---------------------------------------------------------------- DEC-133 选择覆盖已保存检测
+def test_vision_save_detection_can_overwrite_selected_without_typing_name(win, monkeypatch):
+    """下拉选中已保存检测 -> 另存直接覆盖它（不再要求输入同名）。"""
+    from application.presentation.pages import vision as vis_mod
+
+    page, stack, app = _vision(win)
+    _capture("ds86_01", stack, page, app)
+    monkeypatch.setattr(vis_mod, "_ask_text", lambda *a, **k: ("已有检测", True))
+    monkeypatch.setattr(vis_mod, "_confirm", lambda *a, **k: True)
+    page.btn_save_det.click(); app.processEvents()
+    assert stack.vision_detections.find("已有检测") is not None
+
+    # 下拉里出现该检测；选中后保存不再弹名称输入
+    idx = page.det_overwrite.findData("已有检测")
+    assert idx >= 0
+    page.det_overwrite.setCurrentIndex(idx)
+
+    def _no_name(*_a, **_k):
+        raise AssertionError("选中覆盖目标后不应再要求输入名称")
+
+    monkeypatch.setattr(vis_mod, "_ask_text", _no_name)
+    page._widgets["hflip"][0].setChecked(True); app.processEvents()
+    page.btn_save_det.click(); app.processEvents()
+    assert stack.vision_detections.find("已有检测").params[
+        "display_image_ops"].get("hflip") is True
+
+
+def test_vision_save_detection_overwrite_can_be_cancelled(win, monkeypatch):
+    """选中目标但拒绝确认 -> 旧快照保持不变。"""
+    from application.presentation.pages import vision as vis_mod
+
+    page, stack, app = _vision(win)
+    _capture("ds86_01", stack, page, app)
+    monkeypatch.setattr(vis_mod, "_ask_text", lambda *a, **k: ("取消覆盖", True))
+    monkeypatch.setattr(vis_mod, "_confirm", lambda *a, **k: True)
+    page.btn_save_det.click(); app.processEvents()
+    assert stack.vision_detections.find("取消覆盖") is not None
+
+    page.det_overwrite.setCurrentIndex(page.det_overwrite.findData("取消覆盖"))
+    page._widgets["hflip"][0].setChecked(True); app.processEvents()
+    monkeypatch.setattr(vis_mod, "_confirm", lambda *a, **k: False)
+    page.btn_save_det.click(); app.processEvents()
+    assert stack.vision_detections.find("取消覆盖").params[
+        "display_image_ops"].get("hflip") is not True

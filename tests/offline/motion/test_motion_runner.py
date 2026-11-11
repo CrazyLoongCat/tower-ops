@@ -433,6 +433,39 @@ def test_socket_offset_negative_goes_y_minus(tmp_path, monkeypatch):
     assert arm.offsets == [((0.0, -0.012, 0.0, 0.0, 0.0, 0.0), 10)]
 
 
+def test_socket_offset_supports_x_y_z_components(tmp_path, monkeypatch):
+    """DEC-139：套筒偏移可填 Bolt 工具系 X/Y/Z 三轴，一次 move_offset 带全部分量。"""
+    _gate_on(monkeypatch)
+    arm = FakeArm()
+    st = _store(tmp_path)
+    st.add_plan(MotionPlan("sock_xyz", "三轴套筒偏移", "movel", 30, 10, 30,
+                           [Waypoint("socket_offset", (5, 10, -2, 0, 0, 0))],
+                           source="本工程新建"))
+    runner = MotionRunner(arm, st)
+    assert runner.start_plan("sock_xyz") is True
+    assert runner.wait(5.0)
+    assert arm.offsets == [((0.005, 0.010, -0.002, 0.0, 0.0, 0.0), 10)]
+    assert runner.state["mode"] == STATE_IDLE
+
+
+def test_tool_jog_moves_single_axis_with_speed(tmp_path, monkeypatch):
+    """DEC-139：手动调整页的单轴点动（X/Y/Z ±mm）走同一 move_offset 原语。"""
+    _gate_on(monkeypatch)
+    arm = FakeArm()
+    runner = MotionRunner(arm, _store(tmp_path))
+    assert runner.request_tool_jog("X", 5.0, speed=23) is True
+    assert runner.wait(5.0)
+    assert arm.offsets[-1] == ((0.005, 0.0, 0.0, 0.0, 0.0, 0.0), 23)
+    assert runner.request_tool_jog("z", -2.5, speed=15) is True
+    assert runner.wait(5.0)
+    assert arm.offsets[-1] == ((0.0, 0.0, -0.0025, 0.0, 0.0, 0.0), 15)
+    # 非法轴：拒绝并置错误，不下发。
+    before = len(arm.offsets)
+    assert runner.request_tool_jog("A", 1.0) is False
+    assert len(arm.offsets) == before
+    assert "轴非法" in runner.state["last_error"]
+
+
 def test_socket_action_not_arrived_never_auto_continues(tmp_path, monkeypatch):
     """套筒偏移未到位：停止并交人处理；默认确认=拒绝 -> 中止，**不下发下一点**。"""
     _gate_on(monkeypatch)
@@ -509,3 +542,73 @@ def test_fine_confirm_explains_tool_center_not_image_center(tmp_path, monkeypatc
     coarse = [m for t, m in prompts if "粗定位" in t]
     assert fine and "工具中心" in fine[0] and "偏离画面中心" in fine[0]
     assert coarse and "工具中心" not in coarse[0]
+
+
+# ---------------------------------------------------------------- DEC-118 手动圆 override
+class _OverrideGuidance(FakeGuidance):
+    """支持按操作员绘制圆心检测的假引导服务。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.circle_calls = []
+
+    def detect_with_circle(self, *, frame, cx, cy, radius_px=0.0,
+                           fine_profile_ref=None):
+        self.circle_calls.append((cx, cy, radius_px, frame))
+        return GuidanceResult(
+            True, "按操作员圆心", cam_xyz=(20.0, 0.0, 500.0),
+            coarse=(2.5, -1.0), fine=(0.5, 0.2),
+            circle=CircleHit(0, cx, cy, radius_px), used_depth_mm=500.0)
+
+
+def test_guide_override_uses_manual_circle_and_moves(tmp_path, monkeypatch):
+    """界面画/调过的圆作为粗定位依据：不重新找圆，按该圆偏移移动。"""
+    _gate_on(monkeypatch)
+    arm = FakeArm()
+    guide = _OverrideGuidance()
+    runner = MotionRunner(arm, _store(tmp_path), confirm=lambda *a: "是",
+                          guidance=guide)
+    frame = object()
+    assert runner.start_guide(
+        speed=10, stages=("coarse",),
+        override={"frame": frame,
+                  "circle": {"cx": 123.0, "cy": 45.0, "radius_px": 20.0},
+                  "step_id": "motion_page:auto:box1"}) is True
+    assert runner.wait(5.0)
+    assert guide.circle_calls == [(123.0, 45.0, 20.0, frame)]
+    assert guide.calls == 0                                    # 不重新自动找圆
+    assert arm.offsets[0][0] == (0.0025, 0.0, -0.001, 0.0, 0.0, 0.0)
+    assert arm.offsets[0][1] == 10                             # 速度用界面值
+    assert runner.state["mode"] == STATE_IDLE
+
+
+# ---------------------------------------------------------------- DEC-124 偏移上限
+class _HugeGuidance(FakeGuidance):
+    def __init__(self, coarse):
+        super().__init__(coarse=coarse, fine=coarse)
+
+
+def test_guide_rejects_offset_over_configured_limit(tmp_path, monkeypatch):
+    """偏差超过调用方上限（手动引导=参数配置值）-> 拒绝移动，不下发。"""
+    _gate_on(monkeypatch)
+    arm = FakeArm()
+    runner = MotionRunner(arm, _store(tmp_path), confirm=lambda *a: "是",
+                          guidance=_HugeGuidance((80.0, -60.0)))
+    assert runner.start_guide(stages=("coarse",), max_offset_mm=50.0) is True
+    assert runner.wait(5.0)
+    assert arm.offsets == []
+    assert runner.state["mode"] == "error"
+    assert "上限" in str(runner.state.get("last_error"))
+
+
+def test_guide_rejects_offset_over_hard_cap_even_without_limit(tmp_path, monkeypatch):
+    """即使上限配 0（关闭软上限），超 200mm 硬上限也必须拒绝。"""
+    _gate_on(monkeypatch)
+    arm = FakeArm()
+    runner = MotionRunner(arm, _store(tmp_path), confirm=lambda *a: "是",
+                          guidance=_HugeGuidance((250.0, -10.0)))
+    assert runner.start_guide(stages=("coarse",), max_offset_mm=0.0) is True
+    assert runner.wait(5.0)
+    assert arm.offsets == []
+    assert runner.state["mode"] == "error"
+    assert "硬上限" in str(runner.state.get("last_error"))

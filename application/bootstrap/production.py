@@ -31,6 +31,7 @@ from application.services.guidance_config import GuidanceConfigStore
 from application.services.guidance_service import GuidanceService
 from application.services.motion_config import MotionConfigStore
 from application.services.motion_runner import MotionRunner
+from application.services.operation_config import OperationConfigStore
 from application.services.vision_detections import VisionDetectionStore
 from application.adapters.stm32.registry import Stm32Registry
 from application.algorithms.circle.detector import CircleDecisionConfig
@@ -220,6 +221,7 @@ class ProductionRequest:
     motion_config_path: str | None = None
     guidance_config_path: str | None = None
     vision_detections_path: str | None = None
+    operation_config_path: str | None = None
     client_id: str = "windows-main"
     circle_host_cmd: list[str] | None = None
     confirmed_targets: dict[str, JointTarget] = field(default_factory=dict)
@@ -319,6 +321,10 @@ def build_production_stack(req: ProductionRequest) -> AppStack:
         req.vision_detections_path
         or os.path.join(req.runtime_dir, "detections.yaml"))
     vision_detections.load()
+    operation_config = OperationConfigStore(
+        req.operation_config_path
+        or os.path.join(req.runtime_dir, "manual_ops.yaml"))
+    operation_config.load()
     # 引导定位配置：DS86 采集参数与视觉算法参数同源（旧工程 camera_config.json 的 DS86 引导页）
     guidance_store = GuidanceConfigStore(
         req.guidance_config_path or os.path.join(req.runtime_dir, "guidance.yaml"))
@@ -379,6 +385,9 @@ def build_production_stack(req: ProductionRequest) -> AppStack:
                 "S100 相机通道", "S100 端点未配置/未确认: " + "、".join(invalid),
                 keys=tuple(invalid)))
         if not groups:
+            if not any(c.enabled and c.protocol == DeviceProtocol.ZMQ.value
+                       for c in device_config.config.cameras):
+                return cams, issues
             issues.append(StartupIssue(
                 "S100 相机服务", "设备配置里没有可用的 zmq 通道（缺 channel_id 或端点未配置）",
                 keys=tuple(c.camera_id for c in device_config.config.cameras
@@ -408,6 +417,29 @@ def build_production_stack(req: ProductionRequest) -> AppStack:
                                 if cam_id in MIRRORED_CAMERA_IDS else service)
         return cams, issues
 
+    def _build_usb_adapters() -> tuple[dict[str, Any], list[StartupIssue]]:
+        from application.adapters.realsense_usb import D405UsbCamera
+        cams: dict[str, Any] = {}
+        issues: list[StartupIssue] = []
+        rows = [c for c in device_config.config.cameras
+                if c.enabled and c.protocol == DeviceProtocol.REALSENSE_USB.value]
+        for cam in rows:
+            try:
+                serial = (cam.serial or "").strip()
+                if not cam.confirmed or is_placeholder(serial):
+                    raise ValueError("请先扫描并确认绑定 D405 序列号")
+                if sum(1 for c in device_config.config.cameras
+                       if (c.serial or "").strip() == serial) != 1:
+                    raise ValueError(f"序列号 {serial} 重复绑定")
+                adapter = D405UsbCamera(cam.camera_id, serial,
+                                        calibration_version=cam.calibration_id)
+                cams[cam.camera_id] = (wrap_capture_mirror(adapter)
+                                       if cam.camera_id in MIRRORED_CAMERA_IDS else adapter)
+            except Exception as exc:
+                issues.append(StartupIssue("D405 USB 相机", f"{type(exc).__name__}: {exc}",
+                                           keys=(cam.camera_id,)))
+        return cams, issues
+
     def _build_camera_adapters() -> tuple[dict[str, Any], list[StartupIssue]]:
         """按**此刻的**设备配置重建全部相机会话（初次装配与热重载共用）。"""
         cams: dict[str, Any] = {}
@@ -427,6 +459,9 @@ def build_production_stack(req: ProductionRequest) -> AppStack:
         s100_cams, s100_issues = _build_s100_adapters()
         cams.update(s100_cams)
         issues.extend(s100_issues)
+        usb_cams, usb_issues = _build_usb_adapters()
+        cams.update(usb_cams)
+        issues.extend(usb_issues)
         return cams, issues
 
     cameras, camera_issues = _build_camera_adapters()
@@ -537,6 +572,7 @@ def build_production_stack(req: ProductionRequest) -> AppStack:
                               vision_detections=vision_detections, offline=False,
                               host_proxy=host_proxy)
     executor.state_store = state_store
+    executor.operation_config = operation_config   # DEC-155：按螺栓直径选路点
     if hasattr(robot, "tick"):
         executor.register_tickable(robot.tick)
 
@@ -587,8 +623,11 @@ def build_production_stack(req: ProductionRequest) -> AppStack:
     if notice is not None:
         startup_notices.append(notice.message)
 
-    # 引导定位：**本程序内闭环**（DS86 抓图 → 深度引导管线 → cp38 宿主找圆 → 偏差）
+    # 引导定位：**本程序内闭环**（抓图 → 深度引导管线 → cp38 宿主找圆 → 偏差）
+    # DEC-137：默认仍用 DS86；同时把（热重载就地更新的）cameras 字典交给引导服务，
+    # 粗/精定位可按步骤/页面选择的相机通道抓图（如 D405 USB）。
     guidance = GuidanceService(guidance_store, camera=cameras.get("ds86_01"),
+                               cameras=cameras,
                                host_proxy=host_proxy,
                                log=logging_setup.get_logger("guidance").info)
     # 运动方案执行器：**先于 TaskService 建好** —— 绑定「运动方案」的配方步骤编译时要接上它。
@@ -638,6 +677,7 @@ def build_production_stack(req: ProductionRequest) -> AppStack:
         camera_registry=camera_registry,
         motion_config=motion_config, motion=motion,
         vision_detections=vision_detections,
+        operation_config=operation_config,
         teach_points=teach_points,
         startup_issues=startup_issues,
         startup_notices=startup_notices,
@@ -682,9 +722,16 @@ def build_production_stack(req: ProductionRequest) -> AppStack:
         fallback = ((dev.host or "").strip(), dev.port) if dev is not None else None
         return rows, fallback
 
+    def _usb_config_signature() -> Any:
+        return tuple(sorted((c.camera_id, c.enabled, c.confirmed, (c.serial or "").strip(),
+                             (c.calibration_id or "").strip())
+                            for c in device_config.config.cameras
+                            if c.protocol == DeviceProtocol.REALSENSE_USB.value))
+
     _built_signatures = {
         "ds86": _ds86_config_signature(),
         "s100": _s100_config_signature(),
+        "usb": _usb_config_signature(),
     }
 
     def _close_camera_adapters(adapters: list[Any]) -> None:
@@ -711,15 +758,20 @@ def build_production_stack(req: ProductionRequest) -> AppStack:
 
         ds86_sig = _ds86_config_signature()
         s100_sig = _s100_config_signature()
+        usb_sig = _usb_config_signature()
         ds86_changed = (ds86_sig != _built_signatures["ds86"]
                         or camera_id == "ds86_01")
         s100_changed = (s100_sig != _built_signatures["s100"]
+                        or usb_sig != _built_signatures["usb"]
+                        or camera_id in {c.camera_id for c in device_config.config.cameras
+                                         if c.protocol == DeviceProtocol.REALSENSE_USB.value}
                         or camera_id in set(_zmq_camera_ids())
                         or camera_id == "s100_01")
 
         applied: list[str] = []
         problems: list[str] = []
         ds86_problem: str | None = None
+        usb_failure_disconnected = False
 
         # ---- DS86：单独重建，失败保留旧适配器 ----
         if ds86_changed:
@@ -742,9 +794,20 @@ def build_production_stack(req: ProductionRequest) -> AppStack:
         s100_new_issues: list[StartupIssue] | None = None
         if s100_changed:
             s100_cams, s100_new_issues = _build_s100_adapters()
+            usb_cams, usb_issues = _build_usb_adapters()
+            s100_cams.update(usb_cams)
+            s100_new_issues.extend(usb_issues)
             if s100_new_issues:
                 _close_camera_adapters(list(s100_cams.values()))
                 problems.extend(f"{i.device}: {i.reason}" for i in s100_new_issues)
+                if usb_sig != _built_signatures["usb"]:
+                    # A changed physical binding must never keep serving the old camera.
+                    old_keys = [cid for cid in list(cameras) if cid != "ds86_01"]
+                    old_adapters = [cameras.pop(cid) for cid in old_keys]
+                    for cid in old_keys:
+                        camera_registry.unregister(cid)
+                    _close_camera_adapters(old_adapters)
+                    usb_failure_disconnected = True
                 s100_new_issues = None          # 未应用：保留旧 Issues
             else:
                 old_keys = [cid for cid in list(cameras) if cid != "ds86_01"]
@@ -758,6 +821,7 @@ def build_production_stack(req: ProductionRequest) -> AppStack:
                     camera_registry.register(cid, adapter)
                 applied.append("S100")
                 _built_signatures["s100"] = s100_sig
+                _built_signatures["usb"] = usb_sig
 
         if not applied and not problems:
             return "相机配置无变化，未重建会话"
@@ -790,6 +854,8 @@ def build_production_stack(req: ProductionRequest) -> AppStack:
         if problems:
             msg = "；".join(problems)
             log.warning("相机配置部分未应用（旧会话保留）: %s", msg)
+            if usb_failure_disconnected:
+                return f"已重建：{detail}；USB 绑定应用失败，D405 会话已断开：\n{msg}"
             return (f"已重建：{detail}；以下配置未应用，仍使用旧会话：\n{msg}")
         log.info("相机配置已应用: %s", detail)
         return f"相机配置已应用：{detail}"

@@ -85,11 +85,15 @@ class RectHost:
         self.calls: list = []
 
     def detect(self, images, rects, params) -> dict:
+        """一次请求可含多个矩形：每个矩形中心返回一个圆（与真实宿主同语义）。"""
         self.calls.append((len(images), [list(r) for r in rects]))
-        if self.only_first and len(self.calls) > 1:
-            return native_from_circles([])
-        x, y, w, h = rects[0][1], rects[0][2], rects[0][3], rects[0][4]
-        return native_from_circles([(x + w / 2.0, y + h / 2.0, self.radius)])
+        out = []
+        for i, r in enumerate(rects):
+            if self.only_first and i > 0:
+                continue
+            x, y, w, h = r[1], r[2], r[3], r[4]
+            out.append((x + w / 2.0, y + h / 2.0, self.radius))
+        return native_from_circles(out)
 
 
 class EmptyHost(RectHost):
@@ -120,7 +124,7 @@ def test_passes_with_one_circle_per_box():
     assert result.metrics["boxes_with_circle"] == result.metrics["boxes"]
     assert result.metrics["passing_count"] == result.metrics["candidate_count"]
     assert len(result.targets) == int(result.metrics["boxes"])
-    assert len(host.calls) == int(result.metrics["boxes"])
+    assert len(host.calls) == 1, "DEC-135：多矩形一次请求"
     assert "框内圆均合格" in result.reason
     assert result.pipeline_id == "approved_ds86_circle_pipeline"
 
@@ -145,7 +149,7 @@ def test_missing_circle_in_one_box_fails():
     assert result.status is DetectionStatus.FAIL
     assert result.metrics["boxes_without_circle"] >= 1
     assert "未找到圆" in result.reason
-    assert len(host.calls) >= 2
+    assert len(host.calls) >= 1
 
 
 def test_radius_out_of_range_fails():

@@ -186,6 +186,8 @@ hiddenimports = [
     "application.adapters.s100.multipart_decoder",
     "application.adapters.s100.fake_service",
     "application.adapters.camera_mirror",   # DEC-043 D405-2/4 采集层自动双镜像
+    "application.adapters.realsense_usb",
+    "pyrealsense2",  # 打包环境安装 realsense 可选依赖后收集 USB SDK
     # --- 厂家适配器（真实模式；SDK 本身由 vendor_paths 在运行时挂 sys.path）--
     "application.adapters.ds86.real",
     "application.adapters.ds86.scepter",

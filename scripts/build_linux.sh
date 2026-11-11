@@ -58,10 +58,14 @@ echo "== 环境 =="
 echo "  arch: $(uname -m) | $(ldd --version 2>/dev/null | head -1 || true)"
 echo "  注意：PyInstaller 不能交叉编译 —— 本机是什么架构，产物就是什么架构"
 "$PY" -c 'import PySide6, cv2, numpy, pydantic; print("PySide6:", PySide6.__version__, "| cv2:", cv2.__version__)'
+if ! "$PY" -c 'import pyrealsense2; from importlib.metadata import version; print("pyrealsense2:", version("pyrealsense2"))'; then
+  echo "错误：当前构建环境无法导入 pyrealsense2；请先运行 bash scripts/setup_linux_env.sh。" >&2
+  exit 1
+fi
 if ! "$PY" -m PyInstaller --version >/dev/null 2>&1; then
   echo "错误：当前解释器（$PY）未安装 PyInstaller。建议先做构建环境（DEC-113）：" >&2
   echo "  bash scripts/setup_linux_env.sh" >&2
-  echo "  source .venv/bin/activate && bash scripts/build_linux.sh   # 或 PYTHON=.venv/bin/python bash scripts/build_linux.sh" >&2
+  echo "  source ../.venv/bin/activate && bash scripts/build_linux.sh   # 或 PYTHON=../.venv/bin/python bash scripts/build_linux.sh" >&2
   exit 1
 fi
 "$PY" -c 'import onnxruntime; print("onnxruntime:", onnxruntime.__version__)' || \
@@ -74,6 +78,12 @@ echo "== 构建主程序 =="
 rm -rf build_linux
 "$PY" -m PyInstaller --noconfirm --clean \
     --distpath "$DIST" --workpath build_linux packaging/tower-ops-linux.spec
+
+if ! find "$DIST/tower-ops/_internal" -type f -name 'pyrealsense2*.so' -print -quit | grep -q .; then
+  echo "错误：打包结果未找到 pyrealsense2 原生库，D405 USB 不可用；请检查 PyInstaller 日志。" >&2
+  exit 1
+fi
+echo "  D405 USB 原生库已收集（仍需在目标机验证导入与实机采集）"
 
 if [[ "$BUILD_HOST" == "1" ]]; then
   echo "== 构建圆宿主（子进程隔离版，OpenCV 后端）=="

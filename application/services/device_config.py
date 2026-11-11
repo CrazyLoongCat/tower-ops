@@ -33,7 +33,7 @@ TCP_PROTOCOLS = (DeviceProtocol.MODBUS_TCP.value, DeviceProtocol.JSON_TCP.value,
                  DeviceProtocol.ZMQ.value, DeviceProtocol.RTSP.value,
                  DeviceProtocol.HTTP.value, DeviceProtocol.VENDOR_TCP.value)
 # 本地 SDK 直连: 无网络参数, 不做连通性探测
-LOCAL_PROTOCOLS = (DeviceProtocol.SDK.value,)
+LOCAL_PROTOCOLS = (DeviceProtocol.SDK.value, DeviceProtocol.REALSENSE_USB.value)
 URL_PROTOCOLS = (DeviceProtocol.RTSP.value, DeviceProtocol.HTTP.value)
 
 PROTOCOL_LABELS: dict[str, str] = {
@@ -45,6 +45,7 @@ PROTOCOL_LABELS: dict[str, str] = {
     DeviceProtocol.HTTP.value: "HTTP 流",
     DeviceProtocol.VENDOR_TCP.value: "厂商 SDK over TCP",
     DeviceProtocol.SDK.value: "本地 SDK",
+    DeviceProtocol.REALSENSE_USB.value: "D405 USB 直连",
 }
 
 KIND_LABELS: dict[str, str] = {
@@ -433,12 +434,14 @@ class DeviceConfigStore:
 
     # ---------- 相机通道 CRUD ----------
     def add_camera(self, entry: CameraEntry) -> CameraEntry:
+        self._check_usb_binding(entry)
         if self.find_camera(entry.camera_id) is not None:
             raise ValueError(f"相机 ID {entry.camera_id!r} 已存在")
         self.config.cameras.append(entry)
         return entry
 
     def update_camera(self, camera_id: str, entry: CameraEntry) -> CameraEntry:
+        self._check_usb_binding(entry, exclude=camera_id)
         if entry.camera_id != camera_id and self.find_camera(entry.camera_id) is not None:
             raise ValueError(f"相机 ID {entry.camera_id!r} 已被占用")
         for i, c in enumerate(self.config.cameras):
@@ -446,6 +449,16 @@ class DeviceConfigStore:
                 self.config.cameras[i] = entry
                 return entry
         raise KeyError(f"未找到相机 {camera_id!r}")
+
+    def _check_usb_binding(self, entry: CameraEntry, exclude: str = "") -> None:
+        if entry.protocol != DeviceProtocol.REALSENSE_USB.value:
+            return
+        serial = entry.serial.strip()
+        if entry.enabled and (not entry.confirmed or is_placeholder(serial)):
+            raise ValueError("启用 D405 USB 前，请扫描选择序列号并勾选已现场核对")
+        if serial and any(c.camera_id != exclude and c.serial.strip() == serial
+                          for c in self.config.cameras):
+            raise ValueError(f"序列号 {serial!r} 已绑定到其他相机")
 
     def remove_camera(self, camera_id: str) -> None:
         self.config.cameras = [c for c in self.config.cameras if c.camera_id != camera_id]

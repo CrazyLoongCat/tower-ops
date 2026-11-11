@@ -121,6 +121,8 @@ hiddenimports = [
     "onnxruntime.capi._pybind_state",
     "serial",
     "zmq",
+    "pyrealsense2",
+    "pyrealsense2.pyrealsense2",
     # --- 界面（app.py 函数内导入，显式列出防漏收）---------------------------
     "PySide6.QtCore",
     "PySide6.QtGui",
@@ -154,6 +156,7 @@ hiddenimports = [
     "application.adapters.s100.multipart_decoder",
     "application.adapters.s100.fake_service",
     "application.adapters.camera_mirror",
+    "application.adapters.realsense_usb",
     "application.adapters.ds86.real",
     "application.adapters.ds86.scepter",
     "application.adapters.realman.real",

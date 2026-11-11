@@ -26,9 +26,27 @@ from dataclasses import asdict, dataclass, field
 from io import StringIO
 from typing import Any, Sequence
 
-from ruamel.yaml import YAML
+try:  # 现场用 ruamel（保注释/顺序）；沙箱无 ruamel 时退回 PyYAML
+    from ruamel.yaml import YAML
+except Exception:  # noqa: BLE001
+    import yaml as _pyyaml
 
-from application.services.recipes.service import atomic_write, rollback
+    class YAML:  # type: ignore[no-redef] - 最小兼容层
+        def __init__(self, typ: str | None = None, **kw: Any) -> None:
+            self.default_flow_style = False
+            self.width = 4096
+            self.sort_base_mapping_type_on_output = False
+
+        def indent(self, *a: Any, **k: Any) -> None:
+            return None
+
+        def dump(self, data: Any, stream: Any) -> None:
+            _pyyaml.safe_dump(data, stream, allow_unicode=True, sort_keys=False)
+
+        def load(self, stream: Any) -> Any:
+            return _pyyaml.safe_load(stream)
+
+from application.infrastructure.config.atomic import atomic_write, rollback
 
 CONFIG_SCHEMA_VERSION = 1
 SUPPORTED_SCHEMA_VERSIONS = (1,)
@@ -36,17 +54,19 @@ SUPPORTED_SCHEMA_VERSIONS = (1,)
 # 点位方式（方案的 default_mode 只能在这两个里选）。
 POINT_MODES = ("movel", "movej")
 # 套筒偏移方式：把旧工程「套筒偏移」(前进/后退) 与「取出套筒」(进入/脱离) 两组按钮
-# 整理成**一个方案路点方式**。它们底层是**同一个动作**——Bolt 工具系 Y 轴平移偏移
+# 整理成**一个方案路点方式**。它们底层是**同一个动作**——Bolt 工具系平移偏移
 # (``RealMan_Robot/ECO65_NutTighten`` 的 ``_run_socket_move`` / ``_run_pickup``
 #  -> ``_move_axis_offset`` -> ``robot.move_offset``)；旧界面的四个按钮名只是方向标签，
-# 这里**不再逐一定义方式**，改用**带符号的毫米值**表达方向：
-#   +mm = Y+（进入 / 前进），−mm = Y−（脱离 / 后退）。偏移量记在路点 **Y 分量**。
+# 这里用**带符号的毫米值**表达方向：
+#   历史/常用方向 = Y 分量：+mm = Y+（进入 / 前进），−mm = Y−（脱离 / 后退）；
+#   DEC-139：X / Z 分量也放开，可填 Bolt 工具系 dx/dz（同样可正负），三轴可组合；
+#   后 3 项（姿态）必须为 0。
 SOCKET_MODES = ("socket_offset",)
 SOCKET_MODE_LABELS = {"socket_offset": "套筒偏移"}
 # 工具系相对偏移（DEC-060）：沿 **Bolt 工具系** 的 X/Y/Z 平移 dx/dy/dz(mm)，
 # 用一条**直线 movel** 到「当前位姿 + 偏移」的目标位姿（真斜线，不是逐轴走）。
-# 与套筒偏移的区别：套筒偏移是旧工程验证过的「Y 轴 step 偏移」原语；
-# 本方式用于“先抬升、再斜向下回到原位”这类**多轴相对路径**。
+# 与套筒偏移的区别：套筒偏移是旧工程验证过的「工具系 step 偏移」原语（逐轴
+# rm_set_pos_step、阻塞式）；本方式用于“先抬升、再斜向下回到原位”这类**单条直线**路径。
 TOOL_OFFSET_MODES = ("tool_offset",)
 TOOL_OFFSET_MODE_LABELS = {"tool_offset": "工具系偏移"}
 # 全部合法路点方式：点位方式 + 套筒偏移 + 工具系相对偏移。
@@ -55,7 +75,7 @@ LEGACY_SOURCE = "旧工程实测导入（RealMan_Robot/ECO65_NutTighten/configs/
 
 
 def is_socket_mode(mode: str) -> bool:
-    """该路点方式是否为套筒偏移（沿工具系 Y 轴平移偏移）。"""
+    """该路点方式是否为套筒偏移（Bolt 工具系 X/Y/Z step 偏移）。"""
     return mode in SOCKET_MODES
 
 
@@ -65,11 +85,17 @@ def is_tool_offset_mode(mode: str) -> bool:
 
 
 def socket_signed_mm(wp: "Waypoint") -> float:
-    """套筒偏移路点的**带符号**偏移量(mm)：+ = 进入/前进(Y+)，− = 脱离/后退(Y−)。
+    """套筒偏移路点的 **Y 分量** 偏移量(mm)：+ = 进入/前进(Y+)，− = 脱离/后退(Y−)。
 
-    方向直接取 Y 分量本身的正负号（与旧 ``move_offset`` 一致），不再由方式名决定。
+    DEC-139 起套筒偏移也可填 X/Z（见 :func:`socket_offset_mm`）；本函数保留 Y 语义，
+    用于日志/旧调用方（''只关心前进后退分量'' 的场景）。
     """
     return float(wp.pos[1])
+
+
+def socket_offset_mm(wp: "Waypoint") -> tuple[float, float, float]:
+    """套筒偏移路点的 (dx, dy, dz) mm（Bolt 工具系；DEC-139 起 X/Y/Z 都可配置）。"""
+    return float(wp.pos[0]), float(wp.pos[1]), float(wp.pos[2])
 
 
 def tool_offset_mm(wp: "Waypoint") -> tuple[float, float, float]:
@@ -100,20 +126,28 @@ class Waypoint:
     """一个路点：方式 + 6 项坐标。
 
     ``movel``=``[x,y,z(m), rx,ry,rz(rad)]``；``movej``=``[j1..j6](°)``；
-    **套筒偏移**=只用 Y 分量记带符号偏移(mm；+ = 进入/前进 Y+，− = 脱离/后退 Y−)，其余分量应为 0；
+    **套筒偏移**=前 3 项记 Bolt 工具系 dx/dy/dz(mm，可正负；历史用法为 Y 分量=前进/后退，
+    DEC-139 起 X/Z 也可填)，后 3 项须为 0；
     **工具系偏移**=前 3 项记 Bolt 工具系 dx/dy/dz(mm，可正负)，后 3 项须为 0。
     """
 
     mode: str = "movel"
     pos: tuple[float, ...] = (0.0,) * 6
+    # DEC-156：路点名称/备注（如「螺栓一」）——只用于界面辨识与配方下拉显示，
+    # 不参与运动；空 = 无名。
+    note: str = ""
 
     def __post_init__(self) -> None:
         if self.mode not in VALID_MODES:
             raise ValueError(f"路点方式非法: {self.mode!r}；可选 {VALID_MODES}")
         self.pos = _six(self.pos)
+        self.note = str(self.note or "")
 
     def as_dict(self) -> dict:
-        return {"mode": self.mode, "pos": list(self.pos)}
+        out = {"mode": self.mode, "pos": list(self.pos)}
+        if self.note:
+            out["note"] = self.note
+        return out
 
 
 @dataclass
@@ -142,7 +176,8 @@ class MotionPlan:
         return MotionPlan(plan_id=self.plan_id, desc=self.desc,
                           default_mode=self.default_mode, speed=self.speed,
                           blend=self.blend, timeout=self.timeout,
-                          waypoints=[Waypoint(w.mode, w.pos) for w in self.waypoints],
+                          waypoints=[Waypoint(w.mode, w.pos, getattr(w, 'note', ''))
+                                     for w in self.waypoints],
                           source=self.source)
 
 
@@ -181,7 +216,7 @@ class SocketSpec:
 
 @dataclass
 class RobotMotionProfile:
-    """机器人运动相关全局参数（坐标系/速度上限/引导/工艺/安全）。"""
+    """机器人运动相关全局参数（坐标系/速度上限/引导/超时）。"""
 
     active_tool: str = "Bolt"
     active_work: str = "Ganta"
@@ -193,11 +228,13 @@ class RobotMotionProfile:
     # <=0 关闭看门狗（调试用）。
     guide_detect_timeout_s: int = 60
     guide_move_speed: int = 10
-    guide_move_blend: int = 0
-    global_speed: int = 35
-    safety: dict = field(default_factory=dict)
-    insert: dict = field(default_factory=dict)
-    tighten: dict = field(default_factory=dict)
+    # DEC-124：引导单段最大偏移（mm）。检测异常（圆落在远处背景、深度错误）时
+    # 圆心 XYZ 的 X/Y 会随深度 Z 成比例放大，可能给出远超机械臂行程的偏移；
+    # 超过该值直接拒绝移动（0 = 关闭软上限，但代码里仍有 200mm 硬上限兜底）。
+    guide_max_offset_mm: float = 50.0
+    # DEC-138：删除旧工程导入但**从未接线**的字段（global_speed / safety / insert /
+    # tighten / guide_move_blend）。它们此前只做持久化、不参与任何运动；旧 motion.yaml
+    # 里的同名键在加载时被忽略，保存时不再写回。
     source: str = LEGACY_SOURCE
 
 
@@ -250,13 +287,12 @@ def validate(cfg: MotionConfig) -> list[str]:
                 issues.append(f"方案 {plan.plan_id!r} 第 {i} 点坐标: {exc}")
                 continue
             if is_socket_mode(wp.mode):
-                # 套筒偏移只用 Y 分量（带符号偏移 mm）；其余分量应为 0，否则是**填错了列**。
-                others = [pos[k] for k in (0, 2, 3, 4, 5)]
-                if any(abs(v) > 1e-9 for v in others):
+                # DEC-139：套筒偏移可填 Bolt 工具系 X/Y/Z 三个平移分量(mm)；姿态须为 0。
+                if any(abs(pos[k]) > 1e-9 for k in (3, 4, 5)):
                     issues.append(
                         f"方案 {plan.plan_id!r} 第 {i} 点({SOCKET_MODE_LABELS.get(wp.mode, wp.mode)})"
-                        f" 只应填 Y 分量(偏移 mm，带符号)，其余分量须为 0")
-                if abs(pos[1]) <= 1e-9:
+                        f" 只用前 3 项填 Bolt 工具系 dx/dy/dz(mm，可正负)，后 3 项须为 0")
+                if all(abs(pos[k]) <= 1e-9 for k in (0, 1, 2)):
                     issues.append(
                         f"方案 {plan.plan_id!r} 第 {i} 点({SOCKET_MODE_LABELS.get(wp.mode, wp.mode)})"
                         f" 偏移为 0（无动作）")
@@ -379,7 +415,8 @@ class MotionConfigStore:
             raise ValueError(f"不支持的 schema_version={version!r}")
         plans = []
         for raw in (data.get("plans") or []):
-            wps = [Waypoint(str(w.get("mode", "movel")), tuple(w.get("pos") or ()))
+            wps = [Waypoint(str(w.get("mode", "movel")), tuple(w.get("pos") or ()),
+                            str(w.get("note") or ""))
                    for w in (raw.get("waypoints") or [])]
             plans.append(MotionPlan(
                 plan_id=str(raw["plan_id"]), desc=str(raw.get("desc", "")),
@@ -472,6 +509,6 @@ __all__ = [
     "MIN_SPEED", "MotionConfig", "MotionConfigStore", "MotionPlan", "NamedPath",
     "POINT_MODES", "RobotMotionProfile", "SOCKET_MODE_LABELS", "SOCKET_MODES",
     "SocketSpec", "TOOL_OFFSET_MODE_LABELS", "TOOL_OFFSET_MODES", "VALID_MODES",
-    "Waypoint", "is_socket_mode", "is_tool_offset_mode", "socket_signed_mm",
-    "tool_offset_mm", "validate",
+    "Waypoint", "is_socket_mode", "is_tool_offset_mode", "socket_offset_mm",
+    "socket_signed_mm", "tool_offset_mm", "validate",
 ]

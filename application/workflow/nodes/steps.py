@@ -115,16 +115,7 @@ class MovePlanNode(BaseStepNode):
             return self._mark_failure("执行方案绑定了运动方案，但执行栈未接入运动方案执行器")
         si = self.ctx.station_instance_id or ""
         if not self._started:
-            if getattr(self.motion, "busy", False):
-                return self._mark_failure("已有运动任务在执行，运动方案步骤无法开始")
-            if not self.motion.start_plan(self.plan_id):
-                st = self.motion.state or {}
-                err = st.get("last_error") or "离线/未连接/未授权"
-                return self._mark_failure(
-                    f"运动方案 {self.plan_id!r} 被拒：{err}")
-            self._started = True
-            self.outputs.set(si, self.step_id, "motion_plan", self.plan_id)
-            return Status.RUNNING
+            return self._start()
         st = self.motion.state or {}
         mode = st.get("mode")
         if mode == STATE_ERROR:
@@ -136,13 +127,74 @@ class MovePlanNode(BaseStepNode):
         self.outputs.set(si, self.step_id, "motion_plan", self.plan_id)
         return self._mark_success({"motion_plan": self.plan_id})
 
+    def _start(self) -> Status:
+        if getattr(self.motion, "busy", False):
+            return self._mark_failure("已有运动任务在执行，运动方案步骤无法开始")
+        if not self.motion.start_plan(self.plan_id):
+            st = self.motion.state or {}
+            err = st.get("last_error") or "离线/未连接/未授权"
+            return self._mark_failure(
+                f"运动方案 {self.plan_id!r} 被拒：{err}")
+        self._started = True
+        si = self.ctx.station_instance_id or ""
+        self.outputs.set(si, self.step_id, "motion_plan", self.plan_id)
+        return Status.RUNNING
+
+
+class MoveByBoltSizeNode(MovePlanNode):
+    """robot.move_by_bolt_size（DEC-155）：按全局参数「螺栓直径」选运动方案路点。
+
+    - 全局参数 = `manual_ops.yaml` 的 ``bolt_size``（16/20/24，取最近档）；
+    - 步骤配置 ``bolt_size_waypoints``：{"16":1,"20":2,"24":3} → 方案路点序号（1 起）；
+    - 只执行**选中的那一个路点**（与「运动方案」页运行方案同一套运动闸）；
+    - 值未配置映射 / 存储缺失 / 下标的方案里越界 → 明确失败，不猜目标。
+    """
+
+    def __init__(self, name, *, motion, plan_id: str,
+                 size_map: dict[int, int], via_waypoint: int | None = None,
+                 operation_config: Any = None, **kw) -> None:
+        super().__init__(name, motion=motion, plan_id=plan_id, **kw)
+        self.size_map = dict(size_map or {})
+        self.via_waypoint = int(via_waypoint) if via_waypoint else None
+        self.operation_config = operation_config
+
+    def _start(self) -> Status:
+        if self.motion is None:
+            return self._mark_failure("执行方案绑定了运动方案，但执行栈未接入运动方案执行器")
+        if self.operation_config is None:
+            return self._mark_failure(
+                "未接入全局参数存储（manual_ops.yaml），不能按螺栓直径选路点")
+        from application.services.operation_config import nearest_bolt_size
+        size = int(round(nearest_bolt_size(
+            self.operation_config.value("bolt_size"))))
+        idx = self.size_map.get(size)
+        if idx is None:
+            return self._mark_failure(
+                f"全局参数螺栓直径 {size}mm 未在本步配置对应路点"
+                f"（需配置 16/20/24 之一）")
+        if getattr(self.motion, "busy", False):
+            return self._mark_failure("已有运动任务在执行，运动方案步骤无法开始")
+        indices = ([self.via_waypoint - 1] if self.via_waypoint else []) + [int(idx) - 1]
+        if not self.motion.start_selected(self.plan_id, indices):
+            st = self.motion.state or {}
+            err = st.get("last_error") or "离线/未连接/未授权"
+            via = f"先到#{self.via_waypoint} 再到" if self.via_waypoint else ""
+            return self._mark_failure(
+                f"运动方案 {self.plan_id!r} {via}路点#{idx} 被拒：{err}")
+        self._started = True
+        si = self.ctx.station_instance_id or ""
+        self.outputs.set(si, self.step_id, "motion_plan", self.plan_id)
+        self.outputs.set(si, self.step_id, "bolt_size", size)   # 供判断/留证
+        return Status.RUNNING
+
 
 class GuidedPositionNode(BaseStepNode):
-    """vision.guided_position（引导定位）: DS86 抓图→深度引导找圆→粗/精偏差→
+    """vision.guided_position（引导定位）: 相机抓图→深度引导找圆→粗/精偏差→
     每段**人工确认**后按 Bolt 工具系 ``[x, 0, z]`` 偏移（本程序内闭环, DEC-033）。
 
-    与「运动方案」页手动「引导定位」按钮**同一套闸、同一引导服务**：由 ``MotionRunner``
-    的程序内入口驱动（运动闸 + 机械臂连接 + 同一 DS86/圆宿主），不另开通道。
+    默认用 DS86；DEC-137 起可用**任意已启用的相机通道**（如 D405 USB，由步骤的
+    ``camera_ref`` 指定）。与「运动方案」页手动「引导定位」按钮**同一套闸、同一引导服务**：
+    由 ``MotionRunner`` 的程序内入口驱动（运动闸 + 机械臂连接 + 同一圆宿主），不另开通道。
     每段确认由本节点提供（**受限选项 + 留证**，与 operator.confirm 同语义）：
     运行页把该段偏差显示给操作者，``provide("是")`` 才移动；
     **检测失败 / 未确认 / 偏移超上限 / 下发未到位 → 步骤失败**，绝不自动继续。
@@ -223,23 +275,38 @@ class GuidedPositionNode(BaseStepNode):
         if self.motion is None:
             return self._mark_failure("执行方案含引导定位步骤，但执行栈未接入运动方案执行器")
         if not self._started:
-            bound = getattr(getattr(self.motion, "guidance", None), "camera_id", None)
-            if self.camera_ref and bound and self.camera_ref != bound:
-                return self._mark_failure(
-                    f"引导定位步骤引用相机 {self.camera_ref!r}，但引导服务绑定 {bound!r}"
-                    f"（当前只支持 DS86 深度引导）")
+            guidance = getattr(self.motion, "guidance", None)
+            if self.camera_ref:
+                # DEC-137：不再只认 DS86 —— 只要该相机通道此刻有采集会话（设备配置已启用
+                # 且连接成功）就能做引导；没有则如实报"没有可用会话"，不拿别的相机凑数。
+                ids_fn = getattr(guidance, "camera_ids", None)
+                ids = ids_fn() if callable(ids_fn) else None
+                if ids is not None:
+                    if self.camera_ref not in ids:
+                        return self._mark_failure(
+                            f"引导定位步骤引用的相机 {self.camera_ref!r} 此刻没有可用会话"
+                            f"（本次已打开：{'、'.join(ids) or '无'}；"
+                            f"请检查「设备配置」页是否启用/连接）")
+                else:
+                    bound = getattr(guidance, "camera_id", None)
+                    if bound and self.camera_ref != bound:
+                        return self._mark_failure(
+                            f"引导定位步骤引用相机 {self.camera_ref!r}，"
+                            f"但引导服务只接了 {bound!r}")
             if getattr(self.motion, "busy", False):
                 return self._mark_failure("已有运动任务在执行，引导定位步骤无法开始")
             override = self._guide_override()
-            _log.debug("引导定位步骤 %s 启动：段=%s 速度=%s 上限=%smm 沿用视觉帧=%s",
+            _log.debug("引导定位步骤 %s 启动：段=%s 速度=%s 上限=%smm 相机=%s 沿用视觉帧=%s",
                        self.step_id, list(self.stages), self.speed_pct,
-                       self.max_offset_mm,
+                       self.max_offset_mm, self.camera_ref or "默认",
                        (override or {}).get("step_id") or "否")
             kwargs = dict(speed=self.speed_pct, stages=self.stages,
                           max_offset_mm=self.max_offset_mm,
                           confirm=self._make_confirm())
             if self.fine_profile_ref:
                 kwargs["fine_profile_ref"] = self.fine_profile_ref
+            if self.camera_ref:
+                kwargs["camera_id"] = self.camera_ref      # 兼容无 camera_id 的旧假执行器
             if override is not None:
                 kwargs["override"] = override     # 兼容无 override 参数的旧假执行器
             try:
@@ -566,6 +633,37 @@ class VisionRunNode(BaseStepNode):
                           "station_instance_id": self.ctx.station_instance_id or None})
         return text + suffix
 
+    # ---- 圆直径（DEC-147）：像素半径 × 圆心处深度 / √(fx·fy) ----
+    def _circle_diameter_mm(self, cx: float, cy: float, radius_px: float) -> float:
+        """自动/手动圆的物理直径(mm)；帧缺深度或内参时返回 0（不伪造）。"""
+        from application.services.guidance_service import circle_diameter_mm
+
+        frame = self._frame()
+        if frame is None:
+            return 0.0
+        depth = getattr(getattr(frame, "depth", None), "data", None)
+        scale = getattr(frame, "depth_scale_m", None)
+        intr = getattr(frame, "intrinsics", None)
+        if depth is None or not scale or intr is None:
+            return 0.0
+        try:
+            import numpy as _np
+            r = max(2.0, float(radius_px))
+            h, w = depth.shape[:2]
+            x0, x1 = max(0, int(cx - r)), min(w, int(cx + r) + 1)
+            y0, y1 = max(0, int(cy - r)), min(h, int(cy + r) + 1)
+            patch = depth[y0:y1, x0:x1].astype("float64") * float(scale) * 1000.0
+            yy, xx = _np.mgrid[y0:y1, x0:x1]
+            disk = ((xx - cx) ** 2 + (yy - cy) ** 2) <= r * r
+            vals = patch[disk & (patch > 0) & (patch < 65535.0)]
+            if vals.size == 0:
+                return 0.0
+            z = float(_np.median(vals))
+            return circle_diameter_mm(r, z, {"fx": float(intr.fx),
+                                             "fy": float(intr.fy)})
+        except Exception:  # noqa: BLE001 - 直径只是附加信息，失败不影响判定
+            return 0.0
+
     # ---- 手动微调检测圆 (DEC-042, 作业台右卡拖动) ----
     def _decision(self) -> CircleDecisionConfig:
         spec = getattr(getattr(self.executor, "vision", None), "spec", None)
@@ -603,6 +701,20 @@ class VisionRunNode(BaseStepNode):
                     circle = dict(c)
             if circle is None and circles:
                 circle = dict(circles[0])
+            for _b in boxes:                     # DEC-147：圆直径（有深度才补）
+                _c = _b.get("circle")
+                if _c is not None and "diameter_mm" not in _c:
+                    _d = self._circle_diameter_mm(_c.get("cx", 0.0),
+                                                  _c.get("cy", 0.0),
+                                                  _c.get("radius_px", 0.0))
+                    if _d > 0:
+                        _c["diameter_mm"] = round(_d, 1)
+            if circle is not None and "diameter_mm" not in circle:
+                _d = self._circle_diameter_mm(circle.get("cx", 0.0),
+                                              circle.get("cy", 0.0),
+                                              circle.get("radius_px", 0.0))
+                if _d > 0:
+                    circle["diameter_mm"] = round(_d, 1)
             count = len(circles)
             message = self._layout_message
         except Exception as exc:  # noqa: BLE001 - 读取失败如实回报, 不伪造布局
@@ -863,12 +975,16 @@ class VisionRunNode(BaseStepNode):
         self._publish_guide_target()
         focus_dict = (dict(data[selected]["circle"]) if circles and selected is not None
                       else None)
+        diameter_mm = (self._circle_diameter_mm(focus_dict["cx"], focus_dict["cy"],
+                                                focus_dict["radius_px"])
+                       if focus_dict else 0.0)
         return {"status": status.value, "reason": result.reason,
                 "boxes": len(data), "circles": len(circles),
                 "selected_box": selected, "circle": focus_dict,
                 "cx": focus_dict["cx"] if focus_dict else None,
                 "cy": focus_dict["cy"] if focus_dict else None,
                 "radius_px": focus_dict["radius_px"] if focus_dict else None,
+                "diameter_mm": round(diameter_mm, 1),
                 "auto_count": len(old_targets), "manual": True}
 
     def _record_layout(self, old_targets: list, circles: list,
@@ -927,8 +1043,11 @@ class VisionRunNode(BaseStepNode):
         result.status = status
         result.reason = f"手动微调：{why}"
         result.measurements = [MetricMeasurement(name="radius", value=r, unit="px")]
+        diameter_mm = self._circle_diameter_mm(circle.cx, circle.cy, r)
         result.metrics = {**dict(getattr(result, "metrics", {}) or {}),
                           "manual": 1.0, "manual_radius_px": r}
+        if diameter_mm > 0:
+            result.metrics["manual_diameter_mm"] = round(diameter_mm, 3)
         si = self.ctx.station_instance_id or ""
         self.outputs.set(si, self.step_id, "status", status.value)
         self.outputs.set(si, self.step_id, "result", result)
@@ -953,6 +1072,7 @@ class VisionRunNode(BaseStepNode):
             self._publish_guide_target()
         return {"status": status.value, "reason": result.reason,
                 "cx": circle.cx, "cy": circle.cy, "radius_px": r,
+                "diameter_mm": round(diameter_mm, 1),
                 "auto_count": len(old_targets)}
 
     def _record_manual(self, old_targets: list, circle: CirclePrimitive,
@@ -1287,6 +1407,19 @@ def build_node(step, *, ctx: RunContext, executor: Any, outputs: OutputStore,
                 f"（运动步骤需 joint_target_ref 或 motion_plan_ref）")
         return MoveJointNode(f"move:{step.id}", target=target,
                              target_ref=ref, **common)
+    if t is NodeType.ROBOT_MOVE_BY_BOLT_SIZE:
+        plan_ref = (getattr(step, "motion_plan_ref", None) or "").strip()
+        if not plan_ref:
+            raise ValidationFailure(
+                f"步骤 {step.id} 未绑定运动方案（robot.move_by_bolt_size 必须选方案）")
+        mapping = {int(k): int(v)
+                   for k, v in (getattr(step, "bolt_size_waypoints", None) or {}).items()}
+        return MoveByBoltSizeNode(
+            f"move_bs:{step.id}", motion=motion, plan_id=plan_ref,
+            size_map=mapping,
+            via_waypoint=getattr(step, "bolt_size_via_waypoint", None),
+            operation_config=getattr(executor, "operation_config", None),
+            **common)
     if t is NodeType.CUSTOM_CALL:
         method = None
         if methods is not None:

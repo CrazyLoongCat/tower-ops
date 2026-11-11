@@ -306,7 +306,7 @@ def test_guided_step_props_edit_camera_stages_speed_and_limit(win):
     assert page.editor.validate().ok
 
     group = _step_group(page)
-    cam = _combo_by_row_label(group, "相机（DS86 深度引导）")
+    cam = _combo_by_row_label(group, "相机（引导定位）")
     assert cam.currentData() == "ds86_01"
     stages = _combo_by_row_label(group, "段选择")
     assert [stages.itemText(i) for i in range(stages.count())] == \
@@ -335,43 +335,46 @@ def test_guided_step_props_edit_camera_stages_speed_and_limit(win):
     assert any("段 fine" in t for t in texts)
 
 
-# ---------------------------------------------------------------- 引导定位相机 (DEC-034)
-def test_guide_camera_combo_lists_only_ds86(win, monkeypatch):
-    """引导定位的相机下拉**只列 DS86** —— 目录里即使有 D405 也不出现。"""
+# ---------------------------------------------------------------- 引导定位相机 (DEC-137)
+def test_guide_camera_combo_lists_all_enabled_cameras(win, monkeypatch):
+    """DEC-137：引导定位相机下拉列出**所有已启用相机**，DS86 排最前（默认）。"""
     page = _page(win)
     page.editor.new_recipe("r_guide_cam")
     page.editor.set_offline_draft(False)
     sid = page.editor.add_step(NodeType.GUIDED_POSITION)
+    page.editor.set_step_field(sid, "camera_ref", "d405_01")
     page._sel_step = sid
     monkeypatch.setattr(page.editor, "cameras", lambda: ["d405_01", "ds86_01"])
     page._reload()
     group = _step_group(page)
-    cam = _combo_by_row_label(group, "相机（DS86 深度引导）")
-    assert [cam.itemData(i) for i in range(cam.count())] == ["ds86_01"]
+    cam = _combo_by_row_label(group, "相机（引导定位）")
+    assert [cam.itemData(i) for i in range(cam.count())] == ["ds86_01", "d405_01"]
+    assert cam.currentData() == "d405_01"
 
 
-def test_guide_camera_combo_flags_legacy_and_disabled(win, monkeypatch):
-    """老配方的非 DS86 引用看得见、会标注；DS86 未启用时主项仍留 ds86_01 并说明原因。"""
+def test_guide_camera_combo_flags_missing_reference(win, monkeypatch):
+    """引用了未启用相机：下拉里仍列出来并标注「未启用」；目录为空时保留 DS86 占位。"""
     page = _page(win)
     page.editor.new_recipe("r_guide_legacy")
     page.editor.set_offline_draft(False)
     sid = page.editor.add_step(NodeType.GUIDED_POSITION)
-    page.editor.set_step_field(sid, "camera_ref", "d405_01")     # 模拟老配方
+    page.editor.set_step_field(sid, "camera_ref", "d405_01")
     page._sel_step = sid
+    monkeypatch.setattr(page.editor, "cameras", lambda: ["ds86_01"])
     page._reload()
-    cam = _combo_by_row_label(_step_group(page), "相机（DS86 深度引导）")
+    cam = _combo_by_row_label(_step_group(page), "相机（引导定位）")
     assert [cam.itemData(i) for i in range(cam.count())] == ["ds86_01", "d405_01"]
-    assert "非 DS86" in cam.itemText(1)
+    assert "未启用" in cam.itemText(1)
     assert cam.currentData() == "d405_01"
 
-    monkeypatch.setattr(page.editor, "cameras", lambda: ["d405_01"])
+    monkeypatch.setattr(page.editor, "cameras", lambda: [])
     page._reload()
-    cam = _combo_by_row_label(_step_group(page), "相机（DS86 深度引导）")
+    cam = _combo_by_row_label(_step_group(page), "相机（引导定位）")
     assert cam.itemData(0) == "ds86_01" and "未启用" in cam.itemText(0)
 
 
-def test_guided_props_hint_when_ds86_not_open(win, monkeypatch):
-    """本次运行没打开 DS86：属性栏提示「可编辑/保存，运行时如实失败」，不假装可用。"""
+def test_guided_props_hint_when_camera_not_open(win, monkeypatch):
+    """本次运行没打开所选相机：属性栏提示「可编辑/保存，运行时如实失败」，不假装可用。"""
     from PySide6.QtWidgets import QLabel
     _w, _vm, stack, _app = win
     page = _page(win)
@@ -382,7 +385,7 @@ def test_guided_props_hint_when_ds86_not_open(win, monkeypatch):
     monkeypatch.delitem(stack.cameras, "ds86_01")                # 模拟未连接
     page._reload()
     labels = [lb.text() for lb in _step_group(page).findChildren(QLabel)]
-    assert any("未打开 DS86" in t for t in labels)
+    assert any("未打开相机" in t and "ds86_01" in t for t in labels)
 
 
 def test_workbench_guide_confirm_dialog_submits_restricted_choice(win, monkeypatch):

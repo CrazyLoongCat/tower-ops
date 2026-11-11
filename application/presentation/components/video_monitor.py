@@ -27,7 +27,9 @@ if GUI_REQUIRED:
             super().__init__(parent=parent)
             self.ctx = ctx
             self.latest_image = None
+            self.latest_frame = None
             self.snapshot = None
+            self.snapshot_frame = None
             self._channel_signature = None
             self._frame_id = None
             head = QHBoxLayout()
@@ -80,6 +82,7 @@ if GUI_REQUIRED:
 
         def clear_channel(self, *_):
             self.latest_image = self.snapshot = None
+            self.latest_frame = self.snapshot_frame = None
             self._frame_id = None
             self.view.clear_image("等待画面" if self.camera_id else "请选择监控通道")
             self.caption.setText("等待相机画面" if self.camera_id else "未选择通道")
@@ -108,7 +111,12 @@ if GUI_REQUIRED:
                     self.show_error("无法显示此帧")
                     return
                 self.latest_image = image
+                self.latest_frame = frame
                 self._frame_id = frame.frame_id
+                # DEC-119：DS86 通道画面按显示旋转 270°
+                self.view.set_display_rotation(
+                    270 if str(getattr(frame, "camera_id", "")).lower()
+                    .startswith("ds86") else 0)
                 self.view.show_array(frame.color.readonly_view())
             self.caption.setText(f"{source} · {frame.camera_id} · 帧 {frame.sequence}")
             self.capture_button.setEnabled(self.latest_image is not None)
@@ -118,8 +126,10 @@ if GUI_REQUIRED:
             if self.latest_image is None:
                 return
             self.snapshot = self.latest_image.copy()
+            self.snapshot_frame = getattr(self, "latest_frame", None)
             self.save_button.setEnabled(True)
-            self.caption.setText(f"已抓拍 {self.camera_id} · 保存图片可导出原始分辨率")
+            self.caption.setText(
+                f"已抓拍 {self.camera_id} · 保存图片可导出彩色与深度原始分辨率")
 
         def save_snapshot(self):
             if self.snapshot is None:
@@ -129,9 +139,23 @@ if GUI_REQUIRED:
             path, _ = QFileDialog.getSaveFileName(
                 self, "保存监控抓拍", f"capture_{datetime.now():%Y%m%d_%H%M%S}.png",
                 "PNG 图片 (*.png);;JPEG 图片 (*.jpg)")
-            if path:
-                ok = image.save(path)
-                self.caption.setText(f"已保存：{path}" if ok else f"保存失败：{path}")
+            if not path:
+                return
+            ok = image.save(path)
+            saved = [path] if ok else []
+            # DEC-122：深度随抓拍一起存（原始 .npy + 伪彩 PNG）
+            frame = getattr(self, "snapshot_frame", None)
+            depth = getattr(getattr(frame, "depth", None), "data", None)
+            if depth is not None:
+                import os as _os
+
+                from .frame_export import write_depth_sidecar
+                root = _os.path.splitext(path)[0]
+                saved += write_depth_sidecar(
+                    depth, root, frame=frame,
+                    camera_id=getattr(frame, "camera_id", None))
+            self.caption.setText("已保存：" + "；".join(saved)
+                                 if saved else f"保存失败：{path}")
 
     class VideoMonitorDialog(QDialog):
         def __init__(self, ctx, parent=None):

@@ -1,10 +1,10 @@
 # Linux 构建依赖（Ubuntu 22.04 / 24.04，x86_64 或 ARM64）—— DEC-072/073/074
 #
 # 用法（在目标架构的 Ubuntu 上）：
-#   bash scripts/setup_linux_env.sh          # DEC-113：一键建 .venv 并安装本文件
-#   source .venv/bin/activate && bash scripts/build_linux.sh
+#   bash scripts/setup_linux_env.sh          # DEC-113/117：一键建 ../.venv 并安装本文件
+#   source ../.venv/bin/activate && bash scripts/build_linux.sh
 #   # 等价手工步骤：
-#   python3 -m venv .venv && source .venv/bin/activate
+#   python3 -m venv ../.venv && source ../.venv/bin/activate
 #   pip install -r packaging/requirements-linux.txt
 #   bash scripts/build_linux.sh
 #
@@ -27,6 +27,8 @@ py_trees>=2.2
 numpy>=1.26,<2
 pyserial>=3.5
 pyzmq>=25
+# D405 USB。ARM64 的可用 wheel 与 Python 版本有关；参见部署说明。
+pyrealsense2>=2.56,<3
 opencv-python-headless>=4.9
 onnxruntime
 PySide6==6.6.3

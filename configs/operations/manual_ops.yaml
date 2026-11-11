@@ -1,0 +1,41 @@
+# 操作台「杆塔宽度 / 螺栓直径」计算配置（操作台弹窗选择算法/相机后写回本文件）。
+# algorithms 下可复制「默认」改名做多套算法；algorithm 指向上次选中的那套。
+tower_width:
+  camera: ''
+  algorithm: 默认
+  value_mm: 0.0
+  algorithms:
+    默认:
+      tol_mm: 8.0
+      open_kernel: 5
+      line_thr_mm: 3.0
+      min_span: 60
+      scan: auto
+      depth_min_mm: 0.0
+      depth_max_mm: 0.0
+      min_width_mm: 5.0
+      max_width_mm: 3000.0
+bolt_size:
+  camera: ''
+  algorithm: 默认
+  value_mm: 0.0
+  algorithms:
+    默认:
+      depth_range_mode: auto
+      depth_min_mm: 200.0
+      depth_max_mm: 3000.0
+      auto_min_offset_mm: 10.0
+      auto_plane_offset_mm: 20.0
+      auto_plane_tol_mm: 8.0
+      thresh_method: binary_inv
+      thresh_value: 127.0
+      morph_op: none
+      min_contour_area: 300.0
+      max_contour_area: 100000000.0
+      rect_mode: auto
+      rect_pad_px: 20.0
+      rect_merge_gap_px: 30.0
+      circle_type: 最大圆
+      min_radius: 15.0
+      max_radius: 350.0
+      grad_thresh: 30.0

@@ -123,8 +123,8 @@ class OrientationConvention(StrEnum):
 # 引导定位的段（顺序固定 粗→精）；运动方案执行器与配方校验共用同一份定义。
 GUIDE_STAGES = ("coarse", "fine")
 
-# 引导定位只走 DS86 深度引导，且只认设备配置里的这台（DEC-034）：
-# 配方校验、编辑器默认值、引导服务默认相机共用同一常量，避免各处各写 "ds86_01"。
+# 引导定位的默认相机（DEC-034 的 DS86；DEC-137 起不再"只认"这一台——
+# 步骤/页面可选任意已启用相机通道，如 D405 USB；本常量只作缺省值与现场默认排序）。
 GUIDANCE_CAMERA_ID = "ds86_01"
 
 
@@ -132,14 +132,17 @@ class NodeType(StrEnum):
     """固定 node type 映射 (12 §4.4). 未知类型在发布前拒绝."""
 
     ROBOT_MOVE_JOINT = "robot.move_joint"
+    # 按全局参数「螺栓直径」选运动方案路点（DEC-155）：读 manual_ops.yaml 的
+    # bolt_size（16/20/24），查步骤里的 16/20/24→路点序号映射，只执行该路点。
+    ROBOT_MOVE_BY_BOLT_SIZE = "robot.move_by_bolt_size"
     MECHANISM_ACTION = "mechanism.action"
     # 自定义操作: 选一个**已注册的自定义方法**（安全边界由方法库声明），
     # 可对多个设备同时下发、等全部完成（见 application/services/methods.py）。
     CUSTOM_CALL = "custom.call"
     CAMERA_CAPTURE = "camera.capture"
     VISION_RUN = "vision.run"
-    # 引导定位: DS86 抓图 → 深度引导找圆 → 粗/精偏差 → **每段人工确认**后按
-    # Bolt 工具系 [x,0,z] 偏移（本程序内闭环，DEC-033）。
+    # 引导定位: 相机抓图（默认 DS86，DEC-137 可指定已启用相机）→ 深度引导找圆 →
+    # 粗/精偏差 → **每段人工确认**后按 Bolt 工具系 [x,0,z] 偏移（本程序内闭环，DEC-033）。
     GUIDED_POSITION = "vision.guided_position"
     CONDITION = "condition"
     WAIT_STATE = "wait.state"
@@ -231,6 +234,7 @@ class DeviceProtocol(StrEnum):
     HTTP = "http"
     VENDOR_TCP = "vendor_tcp"
     SDK = "sdk"
+    REALSENSE_USB = "realsense_usb"
 
 
 class FailurePolicy(StrEnum):

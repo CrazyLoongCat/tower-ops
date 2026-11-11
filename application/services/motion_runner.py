@@ -14,8 +14,9 @@
 - 执行前统一坐标系守卫 ``ensure_production_frames``（Bolt 工具系 + Ganta 工作系）。
 
 **方案内可混排套筒偏移**：路点方式为 ``socket_offset`` 时，走**同一个**旧工程动作——Bolt
-工具系 Y 轴平移偏移，**方向由 Y 分量的正负号决定**（+ = 进入/前进 Y+，− = 脱离/后退 Y−），
-与「套筒偏移」按钮同源（旧工程 ``_run_socket_move`` / ``_run_pickup``）。
+工具系平移偏移，**方向由各分量的正负号决定**（历史用法 Y：+ = 进入/前进 Y+，− = 脱离/后退 Y−；
+DEC-139 起 X/Z 也放开，可三轴组合），与「套筒偏移」按钮同源
+（旧工程 ``_run_socket_move`` / ``_run_pickup``）。
 该动作与旧实现一样是**阻塞式**（偏移小、耗时短）：**偏移进行中暂停不生效**，停止可用；
 未到位同样**绝不自动继续**，交人处理。
 
@@ -36,7 +37,7 @@ from application.services.motion_config import (
     SOCKET_MODE_LABELS,
     is_socket_mode,
     is_tool_offset_mode,
-    socket_signed_mm,
+    socket_offset_mm,
     tool_offset_mm,
 )
 from application.infrastructure import logging_setup
@@ -52,6 +53,9 @@ STATE_ERROR = "error"
 TIMEOUT_CHOICES = ("重试本点", "跳过本点(风险自担)", "中止方案")
 CONFIRM_YES = "是"
 CONFIRM_NO = "否"
+# DEC-124：引导偏移的硬安全上限（mm）。无论配置/调用方给不给上限，单轴超过它就拒绝移动。
+# 典型异常：圆画/落在远处背景上，深度 3m 时 1px ≈ 十几 mm，X/Y 会被放大到数百 mm。
+HARD_MAX_GUIDE_OFFSET_MM = 200.0
 
 
 def _default_confirm(title: str, message: str, options: list[str]) -> str | None:
@@ -149,9 +153,16 @@ class MotionRunner:
         否则 ``_run_guide`` 等在设了 ``mode=guide/playing`` 之后抛异常，线程死掉而
         状态永远停在"执行中"：界面一直转圈、没有确认条、机械臂不动、也没有报错。
         """
-        if self.busy:
-            self.log("[Motion] 已有运动任务在执行，请先停止")
+        # DEC-157：防重复下发——(a) 忙态检查；(b) 上一个运动线程仍在收尾也拒绝
+        # （stop 后旧线程可能还没退出）；(c) 通过检查后**同步**置 PLAYING，
+        # 堵住"线程还没起来、busy 仍是 idle"的竞态（双击会并发起两个运动线程）。
+        with self._lock:
+            busy = self._state["mode"] in (STATE_PLAYING, STATE_PAUSED, STATE_GUIDE)
+            alive = self._thread is not None and self._thread.is_alive()
+        if busy or alive:
+            self.log("[Motion] 已有运动任务在执行（或上一任务尚在收尾），请稍后再试")
             return False
+        self._set(mode=STATE_PLAYING, message="启动中…", guide_phase="")
         self._stop.clear()
         self._quit.clear()
         self._pause.clear()
@@ -184,6 +195,31 @@ class MotionRunner:
         if not self._ready(f"运行方案 {plan_id!r}"):
             return False
         return self._spawn(self._run_plan, plan.clone())
+
+    def start_selected(self, plan_id: str, indices: Sequence[int]) -> bool:
+        """DEC-155：只执行方案里选中的路点（0 起的下标序列；按给定顺序）。
+
+        供「按螺栓直径运动」步骤使用：全局参数螺栓直径 → 该方案的某个路点。
+        与 start_plan 同一套运动闸/连接闸；下标越界/全空时如实拒绝。
+        """
+        plan = self.store.config.find_plan(plan_id)
+        if plan is None:
+            self._set(mode=STATE_ERROR, last_error=f"方案 {plan_id!r} 不存在")
+            self.log(f"[Motion] 方案 {plan_id!r} 不存在")
+            return False
+        pts = [plan.waypoints[int(i)] for i in indices
+               if 0 <= int(i) < len(plan.waypoints)]
+        if not pts:
+            self._set(mode=STATE_ERROR,
+                      last_error=f"方案 {plan_id!r} 没有可执行的路点（下标越界）")
+            self.log(f"[Motion] 方案 {plan_id!r} 选中路点为空（indices={list(indices)}）")
+            return False
+        if not self._ready(f"运行方案 {plan_id!r} 选中路点"):
+            return False
+        clone = plan.clone()
+        clone.waypoints = pts
+        self.log(f"[Motion] 方案 {plan_id!r} 按选择执行路点 indices={list(indices)}")
+        return self._spawn(self._run_plan, clone)
 
     def _run_plan(self, plan: MotionPlan) -> None:
         self._set(mode=STATE_PLAYING, plan_id=plan.plan_id, index=0,
@@ -329,17 +365,19 @@ class MotionRunner:
                                 per_point_timeout)
 
     def _socket_point(self, plan: MotionPlan, wp: Any, per_point_timeout: float) -> bool:
-        """方案里的一个**套筒偏移**路点（Bolt 工具系 Y 轴平移偏移）。False=结束方案。
+        """方案里的一个**套筒偏移**路点（Bolt 工具系 X/Y/Z step 偏移）。False=结束方案。
 
-        与「套筒偏移」按钮同源：带符号偏移量记在 Y 分量(mm)——**+ = 进入/前进(Y+)，
-        − = 脱离/后退(Y−)**，方向直接取正负号。偏移是**阻塞式**（旧实现如此）——发出后
-        **暂停不生效**，停止可用；未到位**绝不自动继续**，交人处理（与点位超时同一套三选一）。
+        与「套筒偏移」按钮同源：前 3 分量记工具系 dx/dy/dz(mm)，方向直接取正负号
+        （历史用法 Y：+ = 进入/前进，− = 脱离/后退；DEC-139 起 X/Z 也放开，可组合）。
+        偏移是**阻塞式**（旧实现如此）——发出后**暂停不生效**，停止可用；
+        未到位**绝不自动继续**，交人处理（与点位超时同一套三选一）。
         """
         label = SOCKET_MODE_LABELS.get(wp.mode, wp.mode)
-        mm = socket_signed_mm(wp)
-        if abs(mm) <= 1e-9:
+        dx, dy, dz = socket_offset_mm(wp)
+        if all(abs(v) <= 1e-9 for v in (dx, dy, dz)):
             self.log(f"[Motion] {label}: 偏移为 0，跳过")
             return True
+        desc = f"(dx,dy,dz)=({dx:+.1f},{dy:+.1f},{dz:+.1f})mm"
         # 本点**发出前**的暂停要等；发出后靠 stop_check 停止。
         while self._pause.is_set() and not self._quit.is_set():
             self.arm.pause()
@@ -350,8 +388,7 @@ class MotionRunner:
             return False
         self._set(mode=STATE_PLAYING)
         speed = int(self.store.config.profile.guide_move_speed or 10)
-        off = [0.0] * 6
-        off[1] = mm / 1000.0
+        off = [dx / 1000.0, dy / 1000.0, dz / 1000.0, 0.0, 0.0, 0.0]
         try:
             res = self.arm.move_offset(off, v=speed,
                                        stop_check=lambda: self._quit.is_set(),
@@ -361,8 +398,8 @@ class MotionRunner:
             self._set(mode=STATE_ERROR, last_error=f"{label}下发失败: {exc}")
             return False
         if res == 0:
-            self.log(f"[Motion] 方案 {plan.plan_id} {label} {mm:+.1f}mm"
-                     f"（Bolt 工具系 Y 轴，速度{speed}%）到位")
+            self.log(f"[Motion] 方案 {plan.plan_id} {label} {desc}"
+                     f"（Bolt 工具系，速度{speed}%）到位")
             return True
         if res == -2:                          # 被 stop_check 中止（用户停止）
             self.log(f"[Motion] {label} 已停止")
@@ -375,7 +412,7 @@ class MotionRunner:
                  f"move_offset 返回 {res}，已停止等待用户处理")
         choice = self.confirm(
             "套筒偏移未到位",
-            f"方案「{plan.plan_id}」第 {self.state['index']} 点（{label} {mm:+.1f}mm）"
+            f"方案「{plan.plan_id}」第 {self.state['index']} 点（{label} {desc}）"
             f"未正常到位（返回码 {res}），机器人已停止。请确认现场安全后选择：",
             list(TIMEOUT_CHOICES))
         if choice == "跳过本点(风险自担)":
@@ -419,7 +456,8 @@ class MotionRunner:
                     max_offset_mm: float = 0.0,
                     confirm: Callable[[str, str, list[str]], str | None] | None = None,
                     override: dict | None = None,
-                    fine_profile_ref: str | None = None) -> bool:
+                    fine_profile_ref: str | None = None,
+                    camera_id: str | None = None) -> bool:
         """引导定位入口：粗/精段先**本地检测**出偏移，人工确认后在 Bolt 工具系偏移。
 
         手动入口（「运动方案」页按钮）用默认参数：两段、无偏移上限、用界面确认框。
@@ -430,6 +468,9 @@ class MotionRunner:
         ``override``（DEC-048）：视觉判定步骤发布的 ``{frame, circle{cx,cy,radius_px}}``。
         有它时**第一段**不重新抓图/找圆，直接用该帧与人工确认圆心算偏移；其后各段
         （若配方同时选粗+精）仍走正常闭环重新检测。
+
+        ``camera_id``（DEC-137）：重新抓图时用哪台相机通道（空=引导服务默认相机，
+        通常是 DS86）。D405 等其它已启用相机同样可用。
         """
         if not self._ready("引导定位"):
             return False
@@ -439,6 +480,7 @@ class MotionRunner:
             self._set(mode=STATE_ERROR, last_error=f"引导段选择非法: {stages!r}")
             self.log(f"[Motion] 引导段选择非法: {stages!r}（只能是 {GUIDE_STAGES} 的子集）")
             return False
+        guide_cam = str(camera_id or getattr(self.guidance, "camera_id", "") or "")
         # DEC-058 排查：把"用谁的帧/圆"写清楚，现场日志一眼能看出走的是哪条检测链
         if override:
             c = override.get("circle") or {}
@@ -449,6 +491,7 @@ class MotionRunner:
         else:
             src = "无视觉步骤帧（将重新抓图找圆）"
         self.log(f"[Motion] 引导定位启动: 段={list(want)} "
+                 f"相机={guide_cam or '默认'} "
                  f"速度={int(speed or prof.guide_move_speed or 10)}% "
                  f"上限={float(max_offset_mm or 0.0):.1f}mm "
                  f"精定位参数={fine_profile_ref or '默认'} {src}")
@@ -456,7 +499,7 @@ class MotionRunner:
                            int(speed or prof.guide_move_speed or 10),
                            float(prof.guide_recv_timeout_s or 600),
                            want, float(max_offset_mm or 0.0), confirm, override,
-                           fine_profile_ref)
+                           fine_profile_ref, camera_id)
 
     def _log_guide_params(self, fine_profile_ref: str | None) -> None:
         """DEC-070：记录本次引导实际生效的轴映射/符号与 tcp（读不到就跳过，不打断引导）。"""
@@ -474,12 +517,40 @@ class MotionRunner:
         except Exception:  # noqa: BLE001 - 纯诊断日志，读不到不打断引导
             return
 
+    def _guide_detect(self, *, stage: str,
+                      fine_profile_ref: str | None,
+                      camera_id: str | None):
+        """调用引导检测（精定位优先 ``detect_fine``）。
+
+        DEC-137：多了一个可选的 ``camera_id``；旧假引导服务/第三方服务不认这些新
+        关键字时逐项去掉再试，保持兼容。TypeError 只可能是签名不匹配（调用方参数
+        都来自本类内部），与"检测本身失败"（返回 ok=False）区分。
+        """
+        fn = getattr(self.guidance, "detect_fine", None) if stage == "fine" else None
+        if not callable(fn):
+            fn = self.guidance.detect
+        kwargs: dict[str, Any] = {}
+        if fine_profile_ref:
+            kwargs["fine_profile_ref"] = fine_profile_ref
+        if camera_id:
+            kwargs["camera_id"] = camera_id
+        try:
+            return fn(**kwargs)
+        except TypeError:
+            kwargs.pop("camera_id", None)
+            try:
+                return fn(**kwargs)
+            except TypeError:
+                kwargs.pop("fine_profile_ref", None)
+                return fn(**kwargs)
+
     def _run_guide(self, speed: int, recv_timeout: float,
                    stages: tuple[str, ...] = GUIDE_STAGES,
                    max_offset_mm: float = 0.0,
                    confirm: Callable[[str, str, list[str]], str | None] | None = None,
                    override: dict | None = None,
-                   fine_profile_ref: str | None = None) -> None:
+                   fine_profile_ref: str | None = None,
+                   camera_id: str | None = None) -> None:
         """粗 → 精（可只跑其一）：每段先**本地检测**出偏移，人工确认后再偏移。
 
         ``max_offset_mm > 0`` 时 |X|/|Z| 任一超过上限 → **拒绝移动**并置 error
@@ -572,20 +643,12 @@ class MotionRunner:
                     # 精定位：粗定位已把目标移到中心附近，重新检测时优先取**离光心最近**
                     # 的有效圆，避免多圆场景按 hits[0] 继续移动（DEC-063）；
                     # 并选用该步骤配置的精定位参数套（DEC-065）。
-                    fn = getattr(self.guidance, "detect_fine", None) if stage == "fine" else None
-                    if callable(fn):
-                        try:
-                            result = (fn(fine_profile_ref=fine_profile_ref)
-                                      if fine_profile_ref else fn())
-                        except TypeError:      # 兼容旧假引导服务
-                            result = fn()
-                    else:
-                        try:
-                            result = (self.guidance.detect(
-                                fine_profile_ref=fine_profile_ref)
-                                if fine_profile_ref else self.guidance.detect())
-                        except TypeError:
-                            result = self.guidance.detect()
+                    # 精定位：粗定位已把目标移到中心附近，重新检测时优先取**离光心最近**
+                    # 的有效圆，避免多圆场景按 hits[0] 继续移动（DEC-063）；
+                    # 并选用该步骤配置的精定位参数套（DEC-065）、步骤/页面选择的相机（DEC-137）。
+                    result = self._guide_detect(
+                        stage=stage, fine_profile_ref=fine_profile_ref,
+                        camera_id=camera_id)
                 except Exception as exc:  # noqa: BLE001 - 检测异常=步骤失败, 不让线程静默死掉
                     self.log(f"[Motion] 引导定位·{label} 检测异常: {exc}")
                     _record(stage=stage, ok=False, message=f"检测异常: {exc}",
@@ -619,6 +682,24 @@ class MotionRunner:
                 "used_depth_mm": float(result.used_depth_mm or 0.0),
                 "confirmed": False, "applied": False, "message": "",
             }
+            # DEC-124：先做有限性/硬上限检查，再做调用方上限检查 —— 检测异常时
+            # 绝不能把大数下发成 rm_set_pos_step（会超出机械臂行程/危险）。
+            if not (float("-inf") < x_mm < float("inf")
+                    and float("-inf") < z_mm < float("inf")):
+                msg = f"{label}偏移非法（X={x_mm} Z={z_mm}），未移动"
+                self.log(f"[Motion] {msg}")
+                _record(**{**row, "message": msg})
+                self._set(mode=STATE_ERROR, last_error=msg, guide_phase="")
+                return
+            hard = max(abs(x_mm), abs(z_mm))
+            if hard > HARD_MAX_GUIDE_OFFSET_MM:
+                msg = (f"{label}偏移异常（|X|={abs(x_mm):.1f}mm |Z|={abs(z_mm):.1f}mm "
+                       f"> 安全硬上限 {HARD_MAX_GUIDE_OFFSET_MM:.0f}mm，"
+                       f"多半是检测到的深度/圆心不对），已拒绝移动")
+                self.log(f"[Motion] {msg}")
+                _record(**{**row, "message": msg})
+                self._set(mode=STATE_ERROR, last_error=msg, guide_phase="")
+                return
             if max_offset_mm > 0 and (abs(x_mm) > max_offset_mm
                                       or abs(z_mm) > max_offset_mm):
                 msg = (f"{label}偏移超上限（|X|={abs(x_mm):.1f}mm "
@@ -691,6 +772,38 @@ class MotionRunner:
             self._set(mode=STATE_IDLE)
         self.log(f"[Motion] 套筒{'前进' if mm > 0 else '后退'} {abs(mm):.1f}mm"
                  f"（{tool} 工具系 {axis.upper()} 轴，速度{speed}%）下发返回: {res}")
+
+    # ---------- 4) 工具系手动点动（DEC-139，运动方案页「手动调整」） ----------
+    def request_tool_jog(self, axis: str, mm: float, *,
+                         speed: int | None = None) -> bool:
+        """Bolt 工具系**单轴点动**（X/Y/Z，带符号 mm）。
+
+        与套筒偏移同一底层原语（``move_offset`` -> ``rm_set_pos_step``，逐轴步进、阻塞式），
+        只是把方向显式拆成 X/Y/Z 正向/负向，供「手动调整」页按钮调用。
+        """
+        if not self._ready("工具系点动"):
+            return False
+        ax = str(axis).upper()
+        if ax not in ("X", "Y", "Z"):
+            self._set(mode=STATE_ERROR, last_error=f"工具系点动轴非法: {axis!r}")
+            return False
+        return self._spawn(self._run_tool_jog, ax, float(mm),
+                           int(speed or self.store.config.profile.guide_move_speed or 10))
+
+    def _run_tool_jog(self, axis: str, mm: float, speed: int) -> None:
+        self._ensure_frames()
+        idx = {"X": 0, "Y": 1, "Z": 2}[axis]
+        off = [0.0] * 6
+        off[idx] = mm / 1000.0
+        tool = self.store.config.profile.active_tool or "Bolt"
+        try:
+            res = self.arm.move_offset(off, v=speed,
+                                       stop_check=lambda: self._quit.is_set())
+        finally:
+            self._set(mode=STATE_IDLE)
+        sign = "+" if mm >= 0 else "−"
+        self.log(f"[Motion] 工具系点动 {axis}{sign}{abs(mm):.1f}mm"
+                 f"（{tool} 工具系，速度{speed}%）下发返回: {res}")
 
     # ---------- 控制 ----------
     def pause(self) -> None:

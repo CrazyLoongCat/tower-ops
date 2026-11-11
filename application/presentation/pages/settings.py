@@ -1,9 +1,12 @@
 """「参数配置」页（DEC-065）。
 
 左侧分组；右侧可编辑表单。所有修改先落在**内存配置对象**，点「保存」后原子落盘：
-- 运动全局参数 / 工具系·工作系：`configs/motion/motion.yaml` 的 profile；
+- 全局参数（运动参数 / 工具系·工作系 / 杆塔宽度算法 / 螺栓直径，两列展示）：
+  运动参数在 `configs/motion/motion.yaml` 的 profile；两个计算算法在
+  `configs/operations/manual_ops.yaml`（DEC-148）；
   工具系/工作系列表来自**已连接机器人**；离线/读取失败时只读显示当前值，不允许手填。
-- 视觉引导参数：`configs/motion/guidance.yaml` 的深度/找圆/DS86 段。
+- 快捷键：全局快捷键绑定（DEC-115，存 `configs/runtime/settings.yaml`；
+  原「视觉引导参数」块已从本页移除，guidance.yaml 仍由引导定位使用）。
 - 精定位偏移参数：默认套（offsets.fine/tcp）+ 可命名的额外套 `fine_profiles`；
   执行方案的「引导定位」步骤可选择用哪一套。
 - 运行/日志参数：`configs/runtime/settings.yaml`（日志文件级别/保留天数/控制台开关；
@@ -14,22 +17,22 @@ from __future__ import annotations
 import math
 import os
 
-from application.algorithms.guidance.depth_guidance import (
-    CENTER_MODES, MORPH_OPS, THRESH_METHODS,
-)
 from application.algorithms.guidance.offsets import AxisMapping, OffsetParams
 from application.bootstrap import app_paths
 from application.presentation.components import Card, EmptyHint
 from application.services.guidance_config import FineOffsetProfile
 from application.services.runtime_config import (
-    LOG_LEVELS, RuntimeSettings, RuntimeSettingsStore,
+    DEFAULT_SHORTCUTS, LOG_LEVELS, SHORTCUT_ACTIONS, RuntimeSettings,
+    RuntimeSettingsStore, duplicate_shortcuts,
 )
 
 try:  # pragma: no cover
     from PySide6.QtCore import Qt
+    from PySide6.QtGui import QKeySequence
     from PySide6.QtWidgets import (
         QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QFrame, QGridLayout,
-        QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget,
+        QGroupBox, QHBoxLayout, QInputDialog, QKeySequenceEdit, QLabel, QLineEdit,
+        QListWidget,
         QListWidgetItem, QMessageBox, QPushButton, QScrollArea, QSizePolicy,
         QSpinBox, QVBoxLayout, QWidget,
     )
@@ -39,7 +42,7 @@ except Exception:  # noqa: BLE001
     QWidget = object  # type: ignore[assignment]
 
 _CATEGORIES = (
-    ("motion", "运动全局参数"),
+    ("motion", "全局参数"),
     ("guidance", "视觉引导参数"),
     ("fine", "精定位偏移参数"),
     ("runtime", "运行/日志参数"),
@@ -62,6 +65,7 @@ if GUI_REQUIRED:
             self.motion_store = getattr(self.stack, "motion_config", None)
             guidance = getattr(getattr(self.stack, "motion", None), "guidance", None)
             self.guidance_store = getattr(guidance, "config_store", None)
+            self.operation_store = getattr(self.stack, "operation_config", None)
             self.runtime_store = RuntimeSettingsStore(os.path.join(
                 app_paths.configs_dir(), "runtime", "settings.yaml"))
             try:
@@ -139,8 +143,8 @@ if GUI_REQUIRED:
         def _rebuild(self) -> None:
             self._clear()
             sections = (
-                (0, 0, "运动全局参数", self._motion_form),
-                (0, 1, "视觉引导参数", self._guidance_form),
+                (0, 0, "全局参数", self._motion_form),
+                (0, 1, "快捷键", self._shortcuts_form),
                 (1, 0, "精定位偏移参数", self._fine_form),
                 (1, 1, "运行 / 日志参数", self._runtime_form),
             )
@@ -209,7 +213,8 @@ if GUI_REQUIRED:
             if self.motion_store is None:
                 return EmptyHint("未接入运动配置（motion.yaml）")
             prof = self.motion_store.config.profile
-            box = QWidget(); lay = QVBoxLayout(box); lay.setSpacing(8)
+            left = QWidget(); lay = QVBoxLayout(left)
+            lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(8)
             g = QGroupBox("坐标系（来自已连接机器人）")
             form = QFormLayout(g)
 
@@ -261,111 +266,136 @@ if GUI_REQUIRED:
             form2.addRow("引导移动速度(%)", self._spin(
                 prof.guide_move_speed, 1, 100, suffix=" %",
                 on_change=lambda v: setattr(prof, "guide_move_speed", int(v))))
-            form2.addRow("引导移动交融(%)", self._spin(
-                prof.guide_move_blend, 0, 100, suffix=" %",
-                on_change=lambda v: setattr(prof, "guide_move_blend", int(v))))
-            form2.addRow("全局速度(%)", self._spin(
-                prof.global_speed, 1, 100, suffix=" %",
-                on_change=lambda v: setattr(prof, "global_speed", int(v))))
+            form2.addRow("引导单段最大偏移(mm，0=关闭软上限)", self._spin(
+                getattr(prof, "guide_max_offset_mm", 50.0), 0, 1000,
+                decimals=1, step=1.0, suffix=" mm",
+                on_change=lambda v: setattr(prof, "guide_max_offset_mm", float(v))))
             lay.addWidget(g2)
             note = QLabel("工具系/工作系只在机器人已连接且能读取列表时可改；"
                           "离线或读取失败保持只读，保存时不会改这两个值。")
             note.setWordWrap(True); note.setObjectName("SubLabel")
             lay.addWidget(note)
+            lay.addStretch(1)
+
+            right = QWidget(); rlay = QVBoxLayout(right)
+            rlay.setContentsMargins(0, 0, 0, 0); rlay.setSpacing(8)
+            rlay.addWidget(self._global_values_group())
+            rlay.addStretch(1)
+
+            box = QWidget(); grid = QGridLayout(box)
+            grid.setContentsMargins(0, 0, 0, 0); grid.setHorizontalSpacing(10)
+            grid.addWidget(left, 0, 0)
+            grid.addWidget(right, 0, 1)
+            grid.setColumnStretch(0, 1); grid.setColumnStretch(1, 1)
             return box
 
-        # ---------- 视觉引导 ----------
-        def _guidance_form(self) -> QWidget:
-            if self.guidance_store is None:
-                return EmptyHint("未接入引导配置（guidance.yaml）")
-            cfg = self.guidance_store.config
-            d = cfg.depth
-            box = QWidget(); lay = QVBoxLayout(box); lay.setSpacing(8)
-
-            g = QGroupBox("深度切分 / 二值化 / 形态学")
+        # ---------- 计算值（DEC-151：操作台计算结果可同步到这里） ----------
+        def _global_values_group(self) -> QWidget:
+            g = QGroupBox("计算值（操作台计算后可人工改值再同步）")
+            if self.operation_store is None:
+                return g
+            self._value_widgets: dict = {}
             f = QFormLayout(g)
-            f.addRow("深度下限(mm)", self._spin(d.depth_min_mm, 0, 100000, decimals=1, suffix=" mm",
-                                             on_change=lambda v: setattr(d, "depth_min_mm", float(v))))
-            f.addRow("深度上限(mm)", self._spin(d.depth_max_mm, 0, 100000, decimals=1, suffix=" mm",
-                                             on_change=lambda v: setattr(d, "depth_max_mm", float(v))))
-            f.addRow("二值化方法", self._combo(THRESH_METHODS, d.thresh_method,
-                                             lambda v: setattr(d, "thresh_method", v)))
-            f.addRow("二值化阈值", self._spin(d.thresh_value, 0, 255, decimals=1,
-                                           on_change=lambda v: setattr(d, "thresh_value", float(v))))
-            f.addRow("形态学操作", self._combo(MORPH_OPS, d.morph_op,
-                                            lambda v: setattr(d, "morph_op", v)))
-            f.addRow("形态学内核", self._spin(d.morph_kernel_size, 1, 99,
-                                            on_change=lambda v: setattr(d, "morph_kernel_size", int(v))))
+            f.addRow("杆塔宽度(mm)", self._global_value_spin("tower_width"))
+            f.addRow("螺栓直径(mm)", self._bolt_size_combo())
+            return g
+
+        def _global_value_spin(self, op: str) -> QWidget:
+            store = self.operation_store
+            value = store.value(op)
+
+            def _changed(v):
+                store.set_value(op, float(v))
+
+            spin = self._spin(value, 0.0, 65535.0, decimals=1, step=0.1,
+                              suffix=" mm", on_change=_changed)
+            self._value_widgets[op] = spin
+            return spin
+
+        def _bolt_size_combo(self) -> QWidget:
+            """DEC-154：螺栓直径固定三档下拉（16/20/24 mm）。"""
+            from application.services.operation_config import (
+                BOLT_SIZES, nearest_bolt_size,
+            )
+            store = self.operation_store
+            combo = _fit_combo(QComboBox(), chars=6)
+            for v in BOLT_SIZES:
+                combo.addItem(f"{v:g}", v)
+            cur = store.value("bolt_size")
+            idx = combo.findData(nearest_bolt_size(cur if cur > 0 else BOLT_SIZES[0]))
+            combo.setCurrentIndex(max(0, idx))
+            combo.currentIndexChanged.connect(
+                lambda _i, c=combo: store.set_value("bolt_size", float(c.currentData())))
+            self._value_widgets["bolt_size"] = combo
+            return combo
+
+        def reload_computed_values(self) -> None:
+            """DEC-153：操作台弹窗同步计算值后，就地刷新两个数值控件
+            （只动这两个控件，不影响本页其它未保存的修改）。"""
+            if self.operation_store is None:
+                return
+            from application.services.operation_config import nearest_bolt_size
+            for op, widget in getattr(self, "_value_widgets", {}).items():
+                val = self.operation_store.value(op)
+                if isinstance(widget, QComboBox):
+                    idx = widget.findData(nearest_bolt_size(val))
+                    if idx >= 0 and idx != widget.currentIndex():
+                        widget.blockSignals(True)
+                        widget.setCurrentIndex(idx)
+                        widget.blockSignals(False)
+                    continue
+                if abs(float(widget.value()) - val) > 1e-9:
+                    widget.blockSignals(True)
+                    widget.setValue(val)
+                    widget.blockSignals(False)
+
+        # ---------- 全局快捷键（DEC-115） ----------
+        def _shortcuts_form(self) -> QWidget:
+            s = self.runtime_store.settings
+            shortcuts = dict(s.shortcuts)
+            box = QWidget(); lay = QVBoxLayout(box); lay.setSpacing(8)
+            g = QGroupBox("全局快捷键（主窗口内任意页面生效）")
+            f = QFormLayout(g)
+            self._shortcut_edits: dict[str, QKeySequenceEdit] = {}
+            for key, label in SHORTCUT_ACTIONS:
+                edit = QKeySequenceEdit()
+                # 一个动作只绑一个组合键（Ctrl+1 这类组合算一个序列）
+                try:
+                    edit.setMaximumSequenceLength(1)
+                except AttributeError:  # pragma: no cover - 老 Qt 无此接口
+                    pass
+                edit.setKeySequence(QKeySequence(str(shortcuts.get(key, "") or "")))
+                edit.setToolTip("点击后按下要绑定的按键/组合键；按 Backspace 或 Delete 清空 = 不绑定")
+                f.addRow(label, edit)
+                self._shortcut_edits[key] = edit
             lay.addWidget(g)
-
-            g2 = QGroupBox("轮廓过滤 / 正外接矩形 / 平均深度")
-            f2 = QFormLayout(g2)
-            for label, attr, lo, hi, dec in (
-                ("轮廓面积下限(px²)", "min_contour_area", 0, 1e9, 0),
-                ("轮廓面积上限(px²)", "max_contour_area", 0, 1e9, 0),
-                ("轮廓周长下限(px)", "min_contour_len", 0, 1e9, 1),
-                ("轮廓周长上限(px)", "max_contour_len", 0, 1e9, 1),
-                ("矩形边长(px)", "rect_side_length", 1, 10000, 1),
-                ("平均深度直径(px)", "avg_depth_diameter", 0, 10000, 1),
-                ("有效深度下限(mm)", "depth_valid_min_mm", 0, 100000, 1),
-            ):
-                f2.addRow(label, self._spin(
-                    getattr(d, attr), lo, hi, decimals=dec,
-                    on_change=lambda v, a=attr: setattr(d, a, float(v))))
-            f2.addRow("中心方式", self._combo(CENTER_MODES, d.center_mode,
-                                           lambda v: setattr(d, "center_mode", v)))
-            f2.addRow("启用平均深度", self._check(d.avg_depth_enable, "是",
-                                             lambda v: setattr(d, "avg_depth_enable", bool(v))))
-            lay.addWidget(g2)
-
-            g3 = QGroupBox("找圆参数（cp38 宿主）")
-            f3 = QFormLayout(g3)
-            known = ("circle_type", "min_radius", "max_radius", "min_cover_ratio",
-                     "grad_thresh", "circle_fit_error", "arc_fit_error")
-            for key in known:
-                val = cfg.circle.get(key)
-                if key == "circle_type":
-                    f3.addRow("找圆类型", self._line(
-                        val, lambda v, k=key: cfg.circle.__setitem__(k, v)))
-                else:
-                    f3.addRow(key, self._spin(
-                        float(val or 0.0), 0, 100000,
-                        decimals=2 if "ratio" in key or "error" in key else 0,
-                        on_change=lambda v, k=key: cfg.circle.__setitem__(k, float(v))))
-            lay.addWidget(g3)
-
-            g4 = QGroupBox("DS86 采集 / 曝光 / 滤波")
-            f4 = QFormLayout(g4)
-            ds = cfg.ds86
-            text_keys = ("ds86_tof_resolution", "ds86_color_resolution")
-            enum_keys = ("ds86_work_mode", "ds86_align_mode",
-                         "ds86_tof_exposure_mode", "ds86_color_exposure_mode")
-            for key in text_keys:
-                f4.addRow(key, self._line(ds.get(key), lambda v, k=key: ds.__setitem__(k, v)))
-            for key in enum_keys:
-                options = {"ds86_align_mode": ("none", "color_to_depth", "depth_to_color"),
-                           "ds86_work_mode": ("active", "hardware", "software"),
-                           "ds86_tof_exposure_mode": ("auto", "manual"),
-                           "ds86_color_exposure_mode": ("auto", "manual"),
-                           }.get(key, ())
-                f4.addRow(key, self._combo(options, ds.get(key),
-                                         lambda v, k=key: ds.__setitem__(k, v)))
-            for key in ("ds86_fps", "ds86_tof_exposure_time", "ds86_color_exposure_time",
-                        "ds86_color_gain", "ds86_ir_gain",
-                        "ds86_hdr_low_exposure_time", "ds86_hdr_high_exposure_time",
-                        "ds86_confidence_filter_threshold",
-                        "ds86_flying_pixel_filter_threshold",
-                        "ds86_depth_map_min_mm", "ds86_depth_map_max_mm"):
-                f4.addRow(key, self._spin(
-                    float(ds.get(key) or 0.0), 0, 100000, decimals=2,
-                    on_change=lambda v, k=key: ds.__setitem__(k, float(v))))
-            for key in ("ds86_hdr_enable", "ds86_confidence_filter_enable",
-                        "ds86_flying_pixel_filter_enable", "ds86_spatial_filter_enable"):
-                f4.addRow(key, self._check(
-                    bool(ds.get(key)), "开",
-                    lambda v, k=key: ds.__setitem__(k, bool(v))))
-            lay.addWidget(g4)
+            row = QHBoxLayout()
+            reset = QPushButton("恢复默认")
+            reset.setObjectName("Ghost")
+            reset.clicked.connect(self._shortcuts_reset_defaults)
+            row.addWidget(reset)
+            row.addStretch(1)
+            lay.addLayout(row)
+            note = QLabel("改完点底部「保存参数」立即生效，不需要重启；"
+                          "同一按键不能绑定两个动作，留空 = 不绑定。")
+            note.setWordWrap(True); note.setObjectName("SubLabel")
+            lay.addWidget(note)
             return box
+
+        def _shortcuts_reset_defaults(self) -> None:
+            for key, _label in SHORTCUT_ACTIONS:
+                edit = self._shortcut_edits.get(key)
+                if edit is not None:
+                    edit.setKeySequence(QKeySequence(DEFAULT_SHORTCUTS.get(key, "")))
+            self.status.setText("快捷键已恢复默认（未保存）")
+
+        def _collect_shortcuts(self) -> dict[str, str]:
+            out: dict[str, str] = {}
+            for key, _label in SHORTCUT_ACTIONS:
+                edit = getattr(self, "_shortcut_edits", {}).get(key)
+                out[key] = (edit.keySequence().toString()
+                            if edit is not None else "")
+            return out
 
         # ---------- 精定位偏移 ----------
         def _axis_row(self, mapping: AxisMapping, setter) -> QWidget:
@@ -548,22 +578,30 @@ if GUI_REQUIRED:
                     problems += list(validate_motion(self.motion_store.config))
                 except Exception as exc:  # noqa: BLE001
                     problems.append(f"运动配置校验失败: {exc}")
-            if self.guidance_store is not None:
-                try:
-                    from application.services.guidance_config import validate
-                    problems += list(validate(self.guidance_store.config))
-                except Exception as exc:  # noqa: BLE001
-                    problems.append(f"引导配置校验失败: {exc}")
+            # DEC-115：本页已不再编辑 guidance 深度/找圆/DS86 段，保存不再做
+            # guidance 整体校验（否则离线/未填 circle_type 的环境连快捷键都存不了）；
+            # 精定位参数套仍随 guidance.yaml 保存。
             if problems:
                 QMessageBox.warning(self, "参数未保存", "\n".join(problems))
+                return
+            shortcuts = self._collect_shortcuts()
+            duplicates = duplicate_shortcuts(shortcuts)
+            if duplicates:
+                QMessageBox.warning(
+                    self, "参数未保存",
+                    "快捷键重复绑定：" + "、".join(duplicates)
+                    + "\n同一按键只能绑定一个动作，请先修改。")
                 return
             try:
                 if self.motion_store is not None:
                     self.motion_store.save()
                 if self.guidance_store is not None:
                     self.guidance_store.save()
+                if self.operation_store is not None:
+                    self.operation_store.save()
                 if self.runtime_store._settings is None:  # noqa: SLF001
                     self.runtime_store.load()
+                self.runtime_store.settings.shortcuts = shortcuts
                 self.runtime_store.save()
                 # 让配方校验/编辑器立刻看到新增/删除的精定位参数套（DEC-065）
                 rs = getattr(self.stack, "recipes", None)
@@ -574,7 +612,16 @@ if GUI_REQUIRED:
             except Exception as exc:  # noqa: BLE001
                 QMessageBox.warning(self, "保存失败", str(exc))
                 return
-            self.status.setText("已保存（日志级别/保留天数需重启生效）")
+            # DEC-115：快捷键保存后立即在主窗口生效（无需重启）
+            win = self.window()
+            reload_fn = getattr(win, "reload_shortcuts", None)
+            if callable(reload_fn):
+                try:
+                    reload_fn()
+                except Exception as exc:  # noqa: BLE001 - 已保存成功，只提示重载失败
+                    self.status.setText(f"已保存，但快捷键重载失败：{exc}")
+                    return
+            self.status.setText("已保存（快捷键立即生效；日志级别/保留天数需重启生效）")
 
         def refresh(self) -> None:  # pragma: no cover - 页面切换由外壳调用
             # 不自动重读（避免丢掉未保存修改）；仅在首次显示时由构建完成。

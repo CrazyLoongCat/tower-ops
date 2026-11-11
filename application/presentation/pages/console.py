@@ -9,7 +9,7 @@ from application.presentation.theme import THEME
 try:
     from PySide6.QtCore import Qt, QTimer
     from PySide6.QtWidgets import (
-        QComboBox, QDialog, QGridLayout, QHBoxLayout, QLabel, QProgressBar,
+        QComboBox, QGridLayout, QHBoxLayout, QLabel, QProgressBar,
         QPushButton, QScrollArea, QVBoxLayout, QWidget,
     )
     GUI_REQUIRED = True
@@ -20,67 +20,6 @@ from application.presentation.pages.workbench import _STATUS_CN
 
 
 if GUI_REQUIRED:
-    class CapturePopup(QDialog):
-        """操作台执行到抓拍时弹出的**整块**作业台相机卡片（DEC-095）。
-
-        直接复用作业台右卡 ``workbench.image_card``（页签/画框/画圆/定位圆/图像/脚注），
-        打开时从作业台布局“摘下”放进弹窗，关闭时放回原位；卡片仍由作业台刷新驱动。
-        """
-
-        def __init__(self, workbench, parent=None) -> None:
-            super().__init__(parent)
-            self.workbench = workbench
-            self.setWindowTitle("相机通道 · 抓拍与检测圆")
-            self.setModal(False)
-            self.resize(1200, 900)
-            self._lay = QVBoxLayout(self)
-            self._lay.setContentsMargins(10, 10, 10, 10)
-            self._lay.setSpacing(8)
-            self._attached = False
-            self._placeholder = None
-            self._index = -1
-            self.attach()
-
-        def attach(self) -> None:
-            if self._attached:
-                return
-            card = getattr(self.workbench, "image_card", None)
-            slot = getattr(self.workbench, "_image_slot", None)
-            if card is None or slot is None:
-                return
-            self._index = slot.indexOf(card)
-            slot.removeWidget(card)
-            card.setParent(self)
-            self._lay.addWidget(card, 1)
-            self._placeholder = QLabel("抓拍窗口已弹出（关闭弹窗后返回作业台）")
-            self._placeholder.setObjectName("SubLabel")
-            self._placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            slot.insertWidget(self._index, self._placeholder, 4)
-            card.show()
-            self._attached = True
-
-        def detach(self) -> None:
-            if not self._attached:
-                return
-            card = getattr(self.workbench, "image_card", None)
-            slot = getattr(self.workbench, "_image_slot", None)
-            if card is not None:
-                self._lay.removeWidget(card)
-                card.setParent(None)
-            if slot is not None and card is not None:
-                if self._placeholder is not None:
-                    slot.removeWidget(self._placeholder)
-                    self._placeholder.deleteLater()
-                    self._placeholder = None
-                slot.insertWidget(self._index, card, 4)
-                card.show()
-            self._attached = False
-
-        def closeEvent(self, event):  # pragma: no cover - Qt
-            self.detach()
-            super().closeEvent(event)
-
-
     class ConsolePage(QWidget):
         def __init__(self, ctx, workbench):
             super().__init__()
@@ -88,7 +27,10 @@ if GUI_REQUIRED:
             self.vm = ctx.vm
             self.workbench = workbench
             self.monitor = None
+            self._calc_dlgs: dict = {}
+            self._motion_adjust_dlg = None
             self._capture_popup = None
+            self._capture_owned = False
             self._capture_key = None
             self._device_signature = None
             self._camera_signature = None
@@ -228,35 +170,47 @@ if GUI_REQUIRED:
 
         def _build_manual(self):
             card = Card("常用手工操作")
-            card.add(self._label("进入对应控制页操作，沿用当前参数、设备互锁与运动权限。"))
             grid = QGridLayout()
             grid.setSpacing(10)
-            # 快捷入口不隐式采用上次参数下发运动；在原控制页核对后执行。
+            # DEC-148：三个弹窗式操作（塔宽/螺栓计算、机械臂位置调整）
             specs = (
-                ("manual", "机构手动控制", "manual", None),
-                ("motion", "路径实施 / 引导定位", "motion", 1),
-                ("socket", "套筒前进 / 后退", "motion", 1),
-                ("vision", "相机抓拍 / 视觉检测", "vision", None),
-                ("plans", "运动方案", "motion", 0),
-                ("logs", "日志诊断", "diagnostics", None),
+                ("tower_width", "杆塔宽度计算"),
+                ("bolt_size", "螺栓直径计算"),
+                ("motion_adjust", "机械臂位置调整"),
             )
-            # DEC-098：技术员只保留操作台+日志诊断，操作台里的跨页快捷入口
-            # 也只留日志诊断，避免从按钮绕到未展示页面。
-            if getattr(self.ctx, "role", "programmer") == "technician":
-                specs = tuple(s for s in specs if s[2] == "diagnostics")
             self.manual_buttons = {}
-            for i, (key, text, page, tab) in enumerate(specs):
+            for i, (key, text) in enumerate(specs):
                 button = QPushButton(text)
                 button.setObjectName("Ghost")
                 button.setMinimumHeight(48)
-                button.clicked.connect(lambda _=False, p=page, t=tab: self._navigate(p, t))
+                button.clicked.connect(
+                    lambda _=False, k=key: self._open_manual_op(k))
                 grid.addWidget(button, *divmod(i, 2))
                 self.manual_buttons[key] = button
             card.body().addLayout(grid)
             card.body().addStretch(1)
-            self.manual_note = self._label("未绑定的机构动作在手动控制页保持禁用。")
-            card.add(self.manual_note)
             return card
+
+        def _open_manual_op(self, key: str):
+            """打开操作台弹窗（DEC-148）：计算类复用实例，机械臂调整单例。"""
+            from application.presentation.components.manual_ops import (
+                ManualCalcDialog, MotionAdjustDialog,
+            )
+            if key == "motion_adjust":
+                dlg = self._motion_adjust_dlg
+                if dlg is None:
+                    dlg = MotionAdjustDialog(self.ctx, self.window())
+                    self._motion_adjust_dlg = dlg
+            else:
+                dlg = self._calc_dlgs.get(key)
+                if dlg is None:
+                    dlg = ManualCalcDialog(self.ctx, key, self.window())
+                    self._calc_dlgs[key] = dlg
+                else:
+                    dlg._reload_choices()
+            dlg.show()
+            dlg.raise_()
+            dlg.activateWindow()
 
         def _build_monitor(self):
             card = Card("视频监控")
@@ -415,11 +369,8 @@ if GUI_REQUIRED:
             self.block_reason.setText("启动检查：" + "；".join(reasons) if reasons else "方案检查通过")
             self.block_reason.setStyleSheet(f"color:{THEME.warn if reasons else THEME.ok}; background:transparent;")
             self.hint.setText(st.hint)
-            self.manual_note.setText(
-                "任务执行中，请先停止流程再进行独立手动操作。" if active else
-                "未绑定的机构动作在手动控制页保持禁用。")
-            for key, button in self.manual_buttons.items():
-                button.setEnabled(not active or key == "logs")
+            for button in self.manual_buttons.values():
+                button.setEnabled(not active)
             self._refresh_devices()
             self._maybe_show_capture_popup()
 
@@ -438,26 +389,26 @@ if GUI_REQUIRED:
                 return
             key = tuple(sorted((cid, getattr(f, "frame_id", None))
                                for cid, f in frames.items()))
-            if self._capture_popup is None:
-                self._capture_popup = CapturePopup(self.workbench, self)
-            popup = self._capture_popup
             if key != self._capture_key:
                 self._capture_key = key
-                popup.attach()
-                popup.show()
-                popup.raise_()
+                # DEC-119：与作业台共用同一个弹窗外壳与同一块相机卡片
+                self.workbench.toggle_image_popup(True, owner="console")
+                self._capture_popup = self.workbench._ensure_image_popup()
+                self._capture_owned = True
 
         def hideEvent(self, event):  # pragma: no cover - Qt
             # 离开操作台就把抓拍弹窗收起，卡片放回作业台原位。
-            if self._capture_popup is not None:
-                self._capture_popup.close()
+            if self._capture_popup is not None and self._capture_owned:
+                self.workbench.toggle_image_popup(False, owner="console")
+                self._capture_popup = None
+                self._capture_owned = False
             super().hideEvent(event)
 
         def shutdown(self):
             self._timer.stop()
-            if self._capture_popup is not None:
-                self._capture_popup.close()
-                self._capture_popup.deleteLater()
-                self._capture_popup = None
+            if self._capture_popup is not None and self._capture_owned:
+                self.workbench.toggle_image_popup(False, owner="console")
+            self._capture_popup = None
+            self._capture_owned = False
             if self.monitor is not None:
                 self.monitor.shutdown()

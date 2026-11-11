@@ -70,6 +70,7 @@ $tarArgs = @(
   "--exclude=$name/tests",
   "--exclude=$name/.pytest_cache",
   "--exclude=$name/.git",
+  "--exclude=$name/.venv",
   "--exclude=$name/build",
   "--exclude=$name/build_host",
   "--exclude=$name/build_linux",

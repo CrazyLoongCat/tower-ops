@@ -32,6 +32,10 @@ from typing import List, Dict, Any, Optional, Tuple
 import cv2
 import numpy as np
 
+from application.algorithms.guidance.depth_auto_range import (
+    resolve_auto_depth_range,
+)
+
 
 # =====================================================================
 #  参数定义
@@ -48,6 +52,16 @@ class DepthGuidanceParams:
     # 深度切分上下限（mm），剔除该范围之外的深度
     depth_min_mm: float = 200.0
     depth_max_mm: float = 3000.0
+    # 深度范围模式（DEC-133，找圆链）：manual=用上面的手工上下限；
+    # auto=自动计算（下限=本帧最小有效深度−auto_min_offset_mm，
+    # 上限=最大平面平均深度−auto_plane_offset_mm）
+    depth_range_mode: str = "manual"
+    # auto：下限相对「本帧最小有效深度」的偏移（mm）
+    auto_min_offset_mm: float = 10.0
+    # auto：上限相对「最大平面平均深度」的偏移（mm）
+    auto_plane_offset_mm: float = 20.0
+    # auto：最大平面 RANSAC 内点的深度容差（mm）
+    auto_plane_tol_mm: float = 8.0
     # 归一化时是否按切分范围线性映射到 0-255；False 则按全图有效深度最小最大值映射
     normalize_by_range: bool = True
     # 将无效深度(原始值 65535 或超出切分范围)赋值为 255，
@@ -91,7 +105,21 @@ class DepthGuidanceParams:
     center_mode: str = "bbox"
 
     # ---- 步骤 2：正外接矩形 ----
-    # 以中心点设置边长为 X 的正矩形（pix）
+    # DEC-131：新增自动贴合模式与碎块合并；fixed 保留旧算法（旧检测/旧配置兼容）
+    # 矩形模式: auto（自动贴合：按轮廓外接框生成）/ fixed（旧算法：中心点+固定边长正方形）
+    rect_mode: str = "fixed"
+    # 自动贴合方式: square（正方形包住外接框，边长取较大边）/ bbox（按外接框宽高，可长方形）
+    rect_fit: str = "square"
+    # 自动模式：外接框尺寸系数（>0）
+    rect_scale: float = 1.0
+    # 自动模式：四周额外外扩的像素（给找圆留余量）
+    rect_pad_px: float = 0.0
+    # 自动模式：边长下限 / 上限（pix，0=不限）
+    rect_min_side_px: float = 0.0
+    rect_max_side_px: float = 0.0
+    # 合并间距(pix)：两个轮廓外接框间距 ≤ 该值即并成一组只出一个矩形（0=不合并）
+    rect_merge_gap_px: float = 0.0
+    # 以中心点设置边长为 X 的正矩形（pix；仅 fixed 模式生效，旧字段）
     rect_side_length: float = 100.0
 
     # ---- 步骤 3：圆心区域平均深度 ----
@@ -123,6 +151,11 @@ THRESH_METHODS = ("binary", "binary_inv", "otsu", "triangle",
 MORPH_OPS = ("none", "open", "close", "erode", "dilate")
 # 中心点方式
 CENTER_MODES = ("bbox", "centroid")
+# 矩形模式/贴合方式（DEC-131）
+RECT_MODES = ("auto", "fixed")
+RECT_FITS = ("square", "bbox")
+# 深度范围模式（DEC-133）
+DEPTH_RANGE_MODES = ("manual", "auto")
 
 
 # =====================================================================
@@ -400,31 +433,131 @@ def contour_interior_points(contour: np.ndarray,
 
 
 # =====================================================================
-#  步骤 2：轮廓 -> 正外接矩形（以中心点为圆心、边长 X）
+#  步骤 2：轮廓 -> 找圆矩形（DEC-131：自动贴合 + 碎块合并）
 # =====================================================================
+def _bbox_of(contour: np.ndarray) -> Tuple[int, int, int, int]:
+    """轮廓的轴对齐外接框 (x, y, w, h)。"""
+    x, y, w, h = cv2.boundingRect(contour)
+    return int(x), int(y), int(w), int(h)
+
+
+def _box_gap(a: Tuple[int, int, int, int],
+             b: Tuple[int, int, int, int]) -> float:
+    """两个 (x,y,w,h) 外接框的最近间隔（px，相交/接触为 0）。"""
+    ax2, ay2 = a[0] + a[2], a[1] + a[3]
+    bx2, by2 = b[0] + b[2], b[1] + b[3]
+    dx = max(b[0] - ax2, a[0] - bx2, 0)
+    dy = max(b[1] - ay2, a[1] - by2, 0)
+    return float(np.hypot(dx, dy))
+
+
+def _group_boxes_by_gap(boxes: List[Tuple[int, int, int, int]],
+                        gap: float) -> List[List[int]]:
+    """按外接框间距把轮廓分组：间距 ≤ gap 的连成一组（并查集，可传递合并）。
+
+    组按「首轮廓出现顺序」返回；gap <= 0 时每个轮廓单独一组。
+    """
+    n = len(boxes)
+    parent = list(range(n))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    if gap > 0:
+        for i in range(n):
+            for j in range(i + 1, n):
+                if _box_gap(boxes[i], boxes[j]) <= gap:
+                    ri, rj = find(i), find(j)
+                    if ri != rj:
+                        parent[rj] = ri
+    groups: Dict[int, List[int]] = {}
+    for i in range(n):
+        groups.setdefault(find(i), []).append(i)
+    return list(groups.values())
+
+
+def _union_box(boxes: List[Tuple[int, int, int, int]]) -> Tuple[int, int, int, int]:
+    """一组外接框的并集 (x, y, w, h)。"""
+    x1 = min(b[0] for b in boxes)
+    y1 = min(b[1] for b in boxes)
+    x2 = max(b[0] + b[2] for b in boxes)
+    y2 = max(b[1] + b[3] for b in boxes)
+    return x1, y1, x2 - x1, y2 - y1
+
+
+def _clamp_side(v: float, params: DepthGuidanceParams) -> float:
+    """自动模式的边长钳制：最小/最大边长（0=不限），且不小于 2px。"""
+    v = max(2.0, float(v))
+    lo = float(params.rect_min_side_px or 0.0)
+    hi = float(params.rect_max_side_px or 0.0)
+    if lo > 0:
+        v = max(v, lo)
+    if hi > 0:
+        v = min(v, hi)
+    return max(2.0, v)
+
+
 def contours_to_rects(contours: List[np.ndarray],
                       params: DepthGuidanceParams,
                       img_w: int, img_h: int) -> List[Dict[str, Any]]:
-    """由轮廓生成正外接矩形
+    """由轮廓生成找圆用矩形（DEC-131）。
 
-    以轮廓中心点为圆心，构造边长为 ``rect_side_length`` 的正矩形，并裁剪到
-    图像边界内。返回列表元素: ``{cx, cy, x1, y1, x2, y2, w, h}``。
+    - ``rect_mode="fixed"``（旧算法）：以轮廓中心点为圆心、边长
+      ``rect_side_length`` 的正方形，裁剪到图像边界内；单轮廓时中心仍按
+      ``center_mode`` 取质心/外接框中心，行为与旧版一致；
+    - ``rect_mode="auto"``（自动贴合）：``rect_merge_gap_px > 0`` 时先把间距
+      不超过它的轮廓外接框并成一组（同一物体的碎块只出一个矩形），组内取
+      外接框并集，再按 ``rect_fit``：
+        * ``square``：边长 = 较大边 × ``rect_scale`` + 2 × ``rect_pad_px``；
+        * ``bbox``：宽高各自 × ``rect_scale`` + 2 × ``rect_pad_px``；
+      之后按 ``rect_min_side_px / rect_max_side_px`` 钳制、裁剪到图像边界内。
+
+    返回列表元素: ``{cx, cy, x1, y1, x2, y2, w, h, n_contours}``
+    （``cx/cy`` 为最终框中心；``n_contours`` 为该框合并的轮廓数）。
     """
-    side = float(params.rect_side_length)
-    half = side / 2.0
+    mode = str(params.rect_mode or "fixed").lower()
+    if mode not in RECT_MODES:
+        mode = "fixed"
+    boxes = [_bbox_of(c) for c in contours]
+    groups = _group_boxes_by_gap(boxes, float(params.rect_merge_gap_px or 0.0))
+
     rects: List[Dict[str, Any]] = []
-    for c in contours:
-        cx, cy = _contour_center(c, params)
-        x1 = int(round(max(0, cx - half)))
-        y1 = int(round(max(0, cy - half)))
-        x2 = int(round(min(img_w - 1, cx + half)))
-        y2 = int(round(min(img_h - 1, cy + half)))
+    for group in groups:
+        gx, gy, gw, gh = _union_box([boxes[i] for i in group])
+        if mode == "fixed":
+            if len(group) == 1:
+                cx, cy = _contour_center(contours[group[0]], params)
+            else:  # 合并组没有单一轮廓中心，统一用并集框中心
+                cx, cy = gx + gw / 2.0, gy + gh / 2.0
+            w_f = h_f = float(params.rect_side_length)
+        else:
+            scale = max(0.01, float(params.rect_scale or 1.0))
+            pad = max(0.0, float(params.rect_pad_px or 0.0))
+            if str(params.rect_fit or "square").lower() == "bbox":
+                w_f = _clamp_side(gw * scale + 2.0 * pad, params)
+                h_f = _clamp_side(gh * scale + 2.0 * pad, params)
+            else:
+                w_f = h_f = _clamp_side(max(gw, gh) * scale + 2.0 * pad, params)
+            cx, cy = gx + gw / 2.0, gy + gh / 2.0
+        x1 = int(round(cx - w_f / 2.0))
+        y1 = int(round(cy - h_f / 2.0))
+        x2 = int(round(cx + w_f / 2.0))
+        y2 = int(round(cy + h_f / 2.0))
+        # 裁剪到图像内（保持 2px 最小边长）
+        x1 = max(0, min(img_w - 1, x1))
+        y1 = max(0, min(img_h - 1, y1))
+        x2 = max(0, min(img_w - 1, x2))
+        y2 = max(0, min(img_h - 1, y2))
         if x2 - x1 < 2 or y2 - y1 < 2:
             continue
         rects.append({
-            "cx": float(cx), "cy": float(cy),
+            "cx": (x1 + x2) / 2.0, "cy": (y1 + y2) / 2.0,
             "x1": x1, "y1": y1, "x2": x2, "y2": y2,
             "w": x2 - x1, "h": y2 - y1,
+            "n_contours": len(group),
         })
     return rects
 
@@ -641,10 +774,28 @@ def run_depth_guidance(depth_array: np.ndarray,
             - filtered: 形态学滤波后的二值图
             - debug_image: 在彩色图/灰度图上叠加轮廓与自动框的结果图
             - n_contours: 通过过滤的轮廓数
+            - auto_range: depth_range_mode="auto" 时的自动范围解析结果
+              （resolve_auto_depth_range 的返回；manual 模式为 None）
+            - effective_depth_range_mm: 本次实际使用的 [下限, 上限]（mm）
     """
+    # DEC-133：找圆链可自动计算深度范围（下限=最小深度−偏移，上限=最大平面平均−偏移）。
+    # 失败（无有效像素/无平面）时沿用手工上下限，原因随 auto_range 如实返回。
+    effective_params = params
+    auto_range: Optional[Dict[str, Any]] = None
+    if str(getattr(params, "depth_range_mode", "manual")).lower() == "auto":
+        auto_range = resolve_auto_depth_range(
+            depth_array, depth_scale,
+            min_offset_mm=params.auto_min_offset_mm,
+            plane_offset_mm=params.auto_plane_offset_mm,
+            tol_mm=params.auto_plane_tol_mm,
+            invalid_raw_threshold=params.invalid_raw_threshold)
+        if auto_range.get("ok"):
+            effective_params = replace(params,
+                                       depth_min_mm=float(auto_range["min_mm"]),
+                                       depth_max_mm=float(auto_range["max_mm"]))
     depth_mm = depth_to_mm(depth_array, depth_scale)
-    masked = segment_depth(depth_mm, params)
-    gray = normalize_to_gray(masked_mm=masked, params=params,
+    masked = segment_depth(depth_mm, effective_params)
+    gray = normalize_to_gray(masked_mm=masked, params=effective_params,
                             raw_depth=depth_array)
     binary = binarize(gray, params)
     filtered = morphology(binary, params)
@@ -689,6 +840,9 @@ def run_depth_guidance(depth_array: np.ndarray,
         "contour_image": contour_image,
         "debug_image": debug_image,
         "n_contours": len(contours),
+        "auto_range": auto_range,
+        "effective_depth_range_mm": [float(effective_params.depth_min_mm),
+                                     float(effective_params.depth_max_mm)],
     }
 
 

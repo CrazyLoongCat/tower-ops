@@ -58,7 +58,7 @@ def test_console_controls_share_task_and_pending_confirmation(console):
     page.rail.buttons["start"].click()
     assert vm.is_task_active()
     assert not page.recipe_combo.isEnabled()
-    assert not page.manual_buttons["socket"].isEnabled()
+    assert not page.manual_buttons["tower_width"].isEnabled()
     assert page.rail.buttons["request_pause"].isEnabled()
     # 不依赖页面导航；同一 run 的人工确认仍由作业台弹窗承接。
     for _ in range(50):
@@ -76,12 +76,15 @@ def test_console_controls_share_task_and_pending_confirmation(console):
 def test_console_shortcuts_and_configuration_status(console):
     page, window, stack, vm = console
     assert set(page.camera_buttons) == {"ds86_01", "d405_01"}
-    page.manual_buttons["socket"].click()
-    assert window.stack_widget.currentWidget() is window.pages["motion"]
-    assert window.pages["motion"].tabs.currentIndex() == 1
+    # DEC-148：手工操作为三个弹窗——机械臂位置调整内嵌「手动调整」页签
+    page.manual_buttons["motion_adjust"].click()
+    dlg = page._motion_adjust_dlg
+    assert dlg is not None and dlg.page.tabs.currentIndex() == 2
+    dlg.close()
     window._select("console")
-    page.manual_buttons["plans"].click()
-    assert window.pages["motion"].tabs.currentIndex() == 0
+    page.manual_buttons["tower_width"].click()
+    assert page._calc_dlgs.get("tower_width") is not None
+    page._calc_dlgs["tower_width"].close()
     stack.device_config.config.cameras[0].enabled = False
     page.refresh()
     assert "ds86_01" not in page.camera_buttons
@@ -111,6 +114,11 @@ def test_monitor_layout_snapshot_save_and_close(console, tmp_path, monkeypatch):
     tile.save_snapshot()
     from PySide6.QtGui import QImage
     assert QImage(str(target)).convertToFormat(snapshot.format()) == snapshot
+    # DEC-122/123：深度随抓拍一起存（原始 npy + 16位 PNG + JSON 元数据 + 伪彩预览）
+    assert (tmp_path / "snapshot_depth.npy").exists()
+    assert (tmp_path / "snapshot_depth16.png").exists()
+    assert (tmp_path / "snapshot_depth.json").exists()
+    assert (tmp_path / "snapshot_depth.png").exists()
     tile.close_button.click()
     assert tile.camera_id is None
     assert not tile.view.available

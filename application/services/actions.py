@@ -52,6 +52,7 @@ class ActionExecutor:
     cameras: dict[str, Any] = field(default_factory=dict)
     vision: Any = None
     vision_detections: Any = None      # 命名视觉检测存储（解析「运行一次方案」）
+    operation_config: Any = None       # 操作台计算/全局参数存储（manual_ops.yaml，DEC-155）
     offline: bool = False              # 离线档位：智能分割不可用时用占位后端（如实标注）
     boards: Any = None
     ledger: Any = None

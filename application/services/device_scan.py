@@ -199,5 +199,21 @@ def scan_ds86_cameras(*, scan_ms: int = SCAN_MS_PICK, attempts: int = 1,
     return ScanOutcome(devices=cameras, scan_ms=scan_ms)
 
 
+def scan_d405_usb(*, scan_ms: int = 0, scanner=None) -> ScanOutcome:
+    """只枚举 USB 设备；SDK 缺失和零设备分别报告。"""
+    try:
+        if scanner is None:
+            from application.adapters.realsense_usb import scan_d405
+            scanner = scan_d405
+        rows = scanner()
+        cameras = tuple(ScannedCamera(name=str(row.get("name") or "D405"),
+                                      serial=str(row.get("serial") or ""),
+                                      status=STATUS_CONNECTABLE)
+                        for row in rows)
+        return ScanOutcome(devices=cameras, scan_ms=0)
+    except Exception as exc:
+        return ScanOutcome(error=f"扫描 D405 USB 失败: {type(exc).__name__}: {exc}", scan_ms=0)
+
+
 __all__ = ["SCAN_HELP", "SCAN_MS_PICK", "STATUS_CONNECTABLE", "ScanOutcome",
            "ScannedCamera", "scan_ds86_cameras"]

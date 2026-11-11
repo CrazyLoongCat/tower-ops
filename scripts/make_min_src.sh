@@ -49,6 +49,7 @@ EXCLUDES=(
   --exclude="$NAME/tests"
   --exclude="$NAME/.pytest_cache"
   --exclude="$NAME/.git"
+  --exclude="$NAME/.venv"
   --exclude="$NAME/build"
   --exclude="$NAME/build_host"
   --exclude="$NAME/build_linux"

@@ -15,8 +15,8 @@ depth_hi_mm=, depth_scale_m=)``; 不给时走 ``image_ops`` 默认口径 200–3
 from __future__ import annotations
 
 try:  # pragma: no cover
-    from PySide6.QtCore import Qt
-    from PySide6.QtGui import QImage, QPixmap
+    from PySide6.QtCore import Qt, Signal
+    from PySide6.QtGui import QImage, QPixmap, QTransform
     from PySide6.QtWidgets import QLabel, QSizePolicy
     GUI_REQUIRED = True
 except Exception:  # noqa: BLE001
@@ -69,7 +69,13 @@ def to_qimage(array, *, kind: str = "color", depth_lo_mm: float | None = None,
 if GUI_REQUIRED:
 
     class ImageView(QLabel):
-        """等比缩放显示一帧图像; 未设置时显示占位文字。"""
+        """等比缩放显示一帧图像; 未设置时显示占位文字。
+
+        ``clicked(x, y)``：左键点击时发出**显示图坐标**（已含显示旋转）；页面可据此
+        在深度图上取点读值（DEC-126）。
+        """
+
+        clicked = Signal(float, float)
 
         def __init__(self, placeholder: str = "尚未抓拍", parent=None) -> None:
             super().__init__(parent)
@@ -82,7 +88,10 @@ if GUI_REQUIRED:
                 "background:#0E1A22; color:#93A6B2; border:1px solid #24323C;"
                 " border-radius:6px;")
             self._placeholder = placeholder
-            self._pixmap: QPixmap | None = None
+            self._pixmap: QPixmap | None = None      # 已按显示旋转处理过的
+            self._pixmap_raw: QPixmap | None = None  # 原始（未旋转）
+            self._display_rotation = 0               # 仅显示：0/90/180/270（顺时针）
+            self._shown_pixmap: QPixmap | None = None  # 当前按控件尺寸缩放后的图
             self.clear_image()
 
         # ---------- 显示 ----------
@@ -99,14 +108,37 @@ if GUI_REQUIRED:
             if img is None:
                 self.clear_image()
                 return False
-            self._pixmap = QPixmap.fromImage(img)
+            self._pixmap_raw = QPixmap.fromImage(img)
+            self._pixmap = self._rotated(self._pixmap_raw)
             self.setText("")
             self._rescale()
             return True
 
         def clear_image(self, text: str | None = None) -> None:
             self._pixmap = None
+            self._pixmap_raw = None
+            self._shown_pixmap = None
             self.setText(text if text is not None else self._placeholder)
+
+        # ---------- 显示旋转（只影响显示，不改数据，DEC-119） ----------
+        def set_display_rotation(self, degrees: int) -> None:
+            """顺时针旋转显示画面（0/90/180/270）。抓拍数据与坐标仍按原图。"""
+            deg = int(degrees) % 360
+            if deg == self._display_rotation:
+                return
+            self._display_rotation = deg
+            self._pixmap = self._rotated(self._pixmap_raw)
+            self._rescale()
+
+        def display_rotation(self) -> int:
+            return self._display_rotation
+
+        def _rotated(self, pixmap: QPixmap | None) -> QPixmap | None:
+            if pixmap is None:
+                return None
+            if self._display_rotation % 360 == 0:
+                return pixmap
+            return pixmap.transformed(QTransform().rotate(self._display_rotation))
 
         def set_placeholder(self, text: str) -> None:
             self._placeholder = text
@@ -121,9 +153,31 @@ if GUI_REQUIRED:
         def _rescale(self) -> None:  # pragma: no cover - Qt
             if self._pixmap is None:
                 return
-            self.setPixmap(self._pixmap.scaled(
+            self._shown_pixmap = self._pixmap.scaled(
                 self.size(), Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation))
+                Qt.TransformationMode.SmoothTransformation)
+            self.setPixmap(self._shown_pixmap)
+
+        def source_size(self) -> tuple[int, int] | None:
+            """当前显示图（含显示旋转后的）像素尺寸。"""
+            if self._pixmap is None:
+                return None
+            return int(self._pixmap.width()), int(self._pixmap.height())
+
+        def mousePressEvent(self, event) -> None:  # pragma: no cover - Qt
+            if event.button() == Qt.MouseButton.LeftButton \
+                    and self._shown_pixmap is not None:
+                shown = self._shown_pixmap
+                pw, ph = int(shown.width()), int(shown.height())
+                ox = (int(self.width()) - pw) // 2
+                oy = (int(self.height()) - ph) // 2
+                x = float(event.position().x()) - ox
+                y = float(event.position().y()) - oy
+                if pw > 0 and ph > 0 and 0 <= x < pw and 0 <= y < ph:
+                    src = self.source_size()
+                    if src is not None:
+                        self.clicked.emit(x * src[0] / pw, y * src[1] / ph)
+            super().mousePressEvent(event)
 
         def resizeEvent(self, event) -> None:  # pragma: no cover - Qt
             super().resizeEvent(event)

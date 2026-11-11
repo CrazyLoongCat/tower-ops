@@ -34,6 +34,7 @@ from application.services.recipes.service import (
 # 步骤类型的纯中文名（作业台/配方页展示用；DEC-037）
 STEP_TYPE_CN: dict[NodeType, str] = {
     NodeType.ROBOT_MOVE_JOINT: "机器人运动",
+    NodeType.ROBOT_MOVE_BY_BOLT_SIZE: "按螺栓直径运动",
     NodeType.CAMERA_CAPTURE: "抓拍",
     NodeType.VISION_RUN: "视觉判定",
     NodeType.GUIDED_POSITION: "引导定位",
@@ -412,9 +413,11 @@ class RecipeEditor:
             if pipes:
                 step["pipeline_ref"] = pipes[0]
         elif ntype is NodeType.GUIDED_POSITION:
-            # 引导定位只走 DS86 深度引导（DEC-034）：默认就是那台，**不再退到其它相机**
-            # —— 目录里没有它（设备配置未启用）时也照样写进去，由五层校验给出明确原因。
-            step["camera_ref"] = GUIDANCE_CAMERA_ID
+            # DEC-137：引导定位不再只认 DS86。默认优先 DS86（现场既有配法）；
+            # DS86 未启用时退到目录里第一台已启用相机（如 D405），不写必然校验失败的默认值。
+            cams = self.cameras()
+            step["camera_ref"] = (GUIDANCE_CAMERA_ID if GUIDANCE_CAMERA_ID in cams
+                                  else (cams[0] if cams else GUIDANCE_CAMERA_ID))
             step["guide_stages"] = ["coarse", "fine"]
             step["guide_max_offset_mm"] = 0.0
         elif ntype is NodeType.CONDITION:

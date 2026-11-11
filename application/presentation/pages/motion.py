@@ -1,30 +1,38 @@
 """运动方案页（移植旧工程 `ui/panels/motion_plan_panel.py`）。
 
-页内两个子 tab，**编辑与调用隔离**（与旧工程一致）：
+页内三个子 tab，**编辑与调用隔离**（与旧工程一致）：
 
 - **路径规划**：**示教点**（读取机械臂当前关节 → 登记为命名关节目标，写回
   `configs/site/joint_targets.yaml`，执行方案步骤引用它；DEC-067）、方案管理
   （新建/重命名/删除）、新点默认方式、速度%/交融半径%/单点超时、
   路点表（每行独立选方式，可混用 ``movel``/``movej``、**套筒偏移**与**工具系偏移**）、
   读取当前位姿/关节、增删行/上下移/应用。``movel`` 行界面填 **mm + rad**，内部自动换算成 **m** 下发；
-  ``movej`` 行填**度**；**套筒偏移行**只在「y / j2」列填**带符号偏移(mm)**（+ = 进入/前进，− = 脱离/后退），
-  其余列只读——整理自旧工程「套筒偏移」与「取出套筒」两组按钮（底层同一动作：Bolt 工具系 Y 轴偏移）；
+  ``movej`` 行填**度**；**套筒偏移行**前 3 列填 Bolt 工具系 **dx/dy/dz(mm)**（可正负；
+  历史用法 Y：+ = 进入/前进，− = 脱离/后退；DEC-139 起 X/Z 也放开），后 3 列只读；
   **工具系偏移行**前 3 列填 **dx/dy/dz(mm)**（Bolt 工具系，可正负），后 3 列只读——执行时按当前位姿
   算目标位姿并走**一条 movel 直线**（例如先 Z+5 抬升、再 (0,+100,−5) 斜回目标，DEC-060）。
 - **路径实施**：运行方案（单选）、运行/暂停/继续/停止、**引导定位**（粗定位/精定位
   两个按钮，各跑对应段，每次人工确认后移动）、**套筒前进/后退**（Bolt 工具系 Y 轴；
   与方案里的套筒偏移同一动作）；不再显示执行日志（DEC-107）。
+- **手动调整**（DEC-139/145）：Bolt 工具系 **X/Y/Z 正向/负向单步点动**（步长 mm + 速度%），
+  与套筒偏移同一底层原语（``move_offset``）；右侧实时显示**工具位姿 3D 示意**
+  （只读，约 1s 刷新，数值含 mm / rad）。
 
 **运动闸**：未开运动闸时所有运动按钮禁用并提示原因；读取类（读位姿/读关节）不受限。
 数据来自 `configs/motion/motion.yaml`（含旧工程**实测导入**的方案），每条带来源标注。
 """
 from __future__ import annotations
 
+import threading
+
 
 from application.presentation.components import Card, EmptyHint, KV
+from application.presentation.components.robot_pose_view import RobotPoseView
 from application.presentation.components.target_layout_view import TargetLayoutImageView
 from application.presentation.timefmt import to_beijing_text
-from application.services.vision_layout import compute_initial_layout
+from application.services.vision_layout import (
+    compute_initial_layout, find_circle_in_rect,
+)
 from application.services.motion_config import (
     POINT_MODES,
     SOCKET_MODE_LABELS,
@@ -38,7 +46,7 @@ from application.services.motion_config import (
 )
 
 try:  # pragma: no cover
-    from PySide6.QtCore import Qt, QTimer
+    from PySide6.QtCore import Qt, QTimer, Signal
     from PySide6.QtWidgets import (
         QAbstractItemView, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
         QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QInputDialog,
@@ -93,9 +101,16 @@ def _info_dialog(parent, title: str, text: str) -> None:
 if GUI_REQUIRED:
 
     class MotionPage(QWidget):
+        # DEC-116：引导/方案线程里要求确认时，经信号排队到 GUI 线程弹窗。
+        # 在工作线程里直接 QMessageBox(self)（self 属于 GUI 线程）会报
+        # "setParent: new parent is in a different thread" 并崩溃（用户实测）。
+        _confirm_request = Signal(str, str, object, object, object)
+
         def __init__(self, ctx) -> None:
             super().__init__()
             self.ctx = ctx
+            self._gui_thread_ident = threading.get_ident()
+            self._confirm_request.connect(self._confirm_on_gui)
             self.store = _motion_store(ctx)
             self.runner = getattr(ctx.stack, "motion", None)
             # 示教点登记（DEC-067）：只有 production 装配才有；离线为 None（按钮禁用）
@@ -104,6 +119,9 @@ if GUI_REQUIRED:
             self._guide_frame = None          # 最近一次「单次视觉检测」的帧
             self._guide_frame_valid = False   # 机械臂移动过 -> 旧帧不再作为定位依据
             self._guide_layout_note = ""
+            self._guide_frame_cam = ""        # DEC-137：该帧来自哪台相机
+            self._image_popup = None
+            self._popup_open = False
 
             root = QVBoxLayout(self)
             root.setContentsMargins(14, 14, 14, 14)
@@ -124,6 +142,8 @@ if GUI_REQUIRED:
             self.tabs = QTabWidget()
             self.tabs.addTab(self._build_planning(), "路径规划")
             self.tabs.addTab(self._build_execution(), "路径实施")
+            self.tabs.addTab(self._build_manual(), "手动调整")
+            self.tabs.currentChanged.connect(lambda *_a: self._refresh_pose_view())
             root.addWidget(self.tabs, 1)
 
             self._timer = QTimer(self)
@@ -170,9 +190,10 @@ if GUI_REQUIRED:
             row2.addStretch(1)
             lay.addLayout(row2)
 
-            self.wp_table = QTableWidget(0, 7)
+            self.wp_table = QTableWidget(0, 8)
             self.wp_table.setHorizontalHeaderLabels(
-                ["方式", "x / j1", "y / j2", "z / j3", "rx / j4", "ry / j5", "rz / j6"])
+                ["方式", "x / j1", "y / j2", "z / j3", "rx / j4", "ry / j5",
+                 "rz / j6", "名称"])
             self.wp_table.verticalHeader().setVisible(False)
             self.wp_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
             lay.addWidget(self.wp_table, 1)
@@ -191,10 +212,10 @@ if GUI_REQUIRED:
             lay.addLayout(row3)
 
             hint = QLabel("直线行按 x,y,z(mm) + rx,ry,rz(rad) 填（内部换算为 m）；"
-                          "关节行按 j1..j6(°) 填；套筒偏移行只在「y / j2」列填带符号偏移(mm)"
-                          "（+ = 进入/前进，− = 脱离/后退），执行时用引导速度；"
-                          "工具系偏移行前 3 列填 Bolt 工具系 dx/dy/dz(mm)，执行时走一条 movel 直线。"
-                          "读位姿/读关节需机械臂已连接。")
+                          "关节行按 j1..j6(°) 填；套筒偏移行前 3 列填 Bolt 工具系 "
+                          "dx/dy/dz(mm，可正负；历史用法 Y：+ = 进入/前进，− = 脱离/后退)，"
+                          "执行时用引导速度逐轴步进；工具系偏移行前 3 列填 dx/dy/dz(mm)，"
+                          "执行时走一条 movel 直线。读位姿/读关节需机械臂已连接。")
             hint.setObjectName("SubLabel"); hint.setWordWrap(True)
             lay.addWidget(hint)
             return page
@@ -355,16 +376,34 @@ if GUI_REQUIRED:
             row.addStretch(1)
             lay.addLayout(row)
 
-            guide = QGroupBox("引导定位（DS86 深度引导：本地抓图→找圆→偏差，每次人工确认）")
+            guide = QGroupBox("引导定位（深度引导：本地抓图→找圆→偏差，每次人工确认）")
             gh = QHBoxLayout(guide)
             # 左：操作按钮 + 检测结果；右：可画框/画圆的视频画面（DEC-107 / DEC-109）。
             ops = QVBoxLayout()
             row_speed = QHBoxLayout()
             row_speed.addWidget(QLabel("速度%:"))
             self.guide_speed = QSpinBox(); self.guide_speed.setRange(1, 100)
+            # DEC-118：默认跟「参数配置 → 运动全局 → 引导移动速度」一致。
+            # 此前 QSpinBox 初值 0 被 setRange(1,100) 夹成 1%，引导移动几乎看不出来
+            # （move_offset 以 1% 速度走几毫米，还可能在 30s 内到位超时）。
+            _prof = self.store.config.profile
+            self.guide_speed.setValue(
+                max(1, min(100, int(_prof.guide_move_speed or 10))))
             row_speed.addWidget(self.guide_speed)
             row_speed.addStretch(1)
             ops.addLayout(row_speed)
+            # DEC-137：引导相机可选（默认 DS86；D405 USB 等已启用相机同样可做粗/精定位）
+            row_cam = QHBoxLayout()
+            row_cam.addWidget(QLabel("引导相机:"))
+            self.guide_camera = QComboBox()
+            self.guide_camera.setMinimumWidth(130)
+            self.guide_camera.setToolTip(
+                "粗定位/精定位/单次视觉检测用哪台相机：只列本次运行已连接的相机通道"
+                "（设备配置里启用并连接成功的）；默认 DS86，D405 等 USB 相机也可用")
+            self.guide_camera.currentIndexChanged.connect(
+                lambda *_a: self._on_guide_camera_changed())
+            row_cam.addWidget(self.guide_camera, 1)
+            ops.addLayout(row_cam)
             # DEC-109：视觉方案 = 视觉调试页「另存为检测」保存的命名检测；
             # 选定后「单次视觉检测」按该检测的找圆调试参数现算框/圆。
             row_det = QHBoxLayout()
@@ -399,7 +438,12 @@ if GUI_REQUIRED:
             ops.addStretch(1)
             gh.addLayout(ops, 1)
             # 右：画面 + 画框/画圆/删除选中工具条 + 状态说明（DEC-109）
+            # DEC-119：整块包成 image_card，可像作业台/操作台那样弹出独立窗口。
             right = QVBoxLayout()
+            self.image_card = QWidget()
+            _card_lay = QVBoxLayout(self.image_card)
+            _card_lay.setContentsMargins(0, 0, 0, 0)
+            _card_lay.setSpacing(6)
             tbar = QHBoxLayout(); tbar.setSpacing(6)
             self.btn_draw_box = QPushButton("画框"); self.btn_draw_box.setCheckable(True)
             self.btn_draw_box.setEnabled(False)
@@ -414,24 +458,44 @@ if GUI_REQUIRED:
             self.btn_del_target.setToolTip("删除选中的框；若选中的是框内的圆，只删圆")
             self.btn_del_target.clicked.connect(
                 lambda: self.view_result.delete_selected())
+            self.btn_save_img = QPushButton("保存图片")
+            self.btn_save_img.setEnabled(False)
+            self.btn_save_img.setToolTip(
+                "保存当前引导帧：彩色 PNG + 原始深度（npy / 16位PNG / JSON 元数据）+ 伪彩预览；"
+                "均不含显示旋转与预览算法")
+            self.btn_save_img.clicked.connect(self._save_guide_image)
+            self.btn_popup = QPushButton("弹窗")
+            self.btn_popup.setCheckable(True)
+            self.btn_popup.setToolTip("把引导画面弹出为独立窗口（成像与画框/画圆不变）；再点一次关闭")
+            self.btn_popup.toggled.connect(self._toggle_image_popup)
             for b in (self.btn_draw_box, self.btn_draw_circle, self.btn_del_target):
                 tbar.addWidget(b)
+            tbar.addWidget(self.btn_save_img)
+            tbar.addWidget(self.btn_popup)
             tbar.addStretch(1)
-            right.addLayout(tbar)
+            _card_lay.addLayout(tbar)
             self.view_result = TargetLayoutImageView("尚未检测")
+            # DEC-119：默认引导相机 DS86 画面按显示旋转 270°（坐标仍是原图）；
+            # DEC-137：换成其它相机（如 D405 USB）时在 _apply_guide_frame 按帧改回 0°。
+            self.view_result.set_display_rotation(270)
             self.view_result.mode_changed.connect(self._sync_guide_mode_buttons)
+            # DEC-118：组件只发信号，框/圆由页面落进本地布局（与作业台同一约定）
+            self.view_result.box_requested.connect(self._on_guide_box_requested)
+            self.view_result.circle_drawn.connect(self._on_guide_circle_drawn)
             self.view_result.message.connect(
                 lambda text: self.guide_status.setText(text or ""))
             self.view_result.layout_changed.connect(self._on_guide_layout_changed)
             self.view_result.selection_changed.connect(
                 lambda *_a: self._on_guide_layout_changed())
-            right.addWidget(self.view_result, 1)
+            _card_lay.addWidget(self.view_result, 1)
             self.guide_status = QLabel(
                 "选择视觉方案 →「单次视觉检测」→ 可在图上画框/画圆并拖动调整；"
                 "粗定位/精定位用选中框的圆（没有则用第一个有圆的框）。")
             self.guide_status.setObjectName("SubLabel")
             self.guide_status.setWordWrap(True)
-            right.addWidget(self.guide_status)
+            _card_lay.addWidget(self.guide_status)
+            right.addWidget(self.image_card, 1)
+            self._image_slot = right
             gh.addLayout(right, 2)
             lay.addWidget(guide, 1)
 
@@ -456,6 +520,102 @@ if GUI_REQUIRED:
 
             return page
 
+        # ---------------- 手动调整：工具系点动 + 位姿示意（DEC-139/145） ----------------
+        def _build_manual(self) -> QWidget:
+            page = QWidget()
+            lay = QVBoxLayout(page)
+            split = QHBoxLayout()
+
+            # 左：工具系点动（Bolt 工具系 X/Y/Z 正负方向，每次一个步长）
+            g = QGroupBox("工具系点动（Bolt）")
+            gl = QGridLayout(g)
+            gl.setHorizontalSpacing(8)
+            gl.setVerticalSpacing(8)
+            head_row = QHBoxLayout()
+            head_row.addWidget(QLabel("步长(mm):"))
+            self.jog_step = QDoubleSpinBox()
+            self.jog_step.setRange(0.1, 200.0)
+            self.jog_step.setDecimals(1)
+            self.jog_step.setSingleStep(0.5)
+            self.jog_step.setValue(5.0)
+            head_row.addWidget(self.jog_step)
+            head_row.addSpacing(10)
+            head_row.addWidget(QLabel("速度%:"))
+            self.jog_speed = QSpinBox()
+            self.jog_speed.setRange(1, 100)
+            self.jog_speed.setValue(max(1, min(100, int(
+                self.store.config.profile.guide_move_speed or 10))))
+            head_row.addWidget(self.jog_speed)
+            head_row.addStretch(1)
+            gl.addLayout(head_row, 0, 0, 1, 3)
+
+            self.jog_buttons: dict[tuple[str, int], QPushButton] = {}
+            for i, axis in enumerate(("X", "Y", "Z"), start=1):
+                gl.addWidget(QLabel(f"{axis} 轴"), i, 0)
+                minus = QPushButton(f"{axis} −")
+                minus.setObjectName("Ghost")
+                minus.setFixedSize(64, 28)
+                minus.clicked.connect(lambda _=False, a=axis: self._jog(a, -1))
+                plus = QPushButton(f"{axis} +")
+                plus.setObjectName("Primary")
+                plus.setFixedSize(64, 28)
+                plus.clicked.connect(lambda _=False, a=axis: self._jog(a, +1))
+                gl.addWidget(minus, i, 1)
+                gl.addWidget(plus, i, 2)
+                self.jog_buttons[(axis, -1)] = minus
+                self.jog_buttons[(axis, +1)] = plus
+            gl.setColumnStretch(3, 1)
+            gl.setRowStretch(4, 1)
+            left = QVBoxLayout()
+            left.addWidget(g)
+            left.addStretch(1)
+            split.addLayout(left, 0)
+
+            # 右：工具位姿 3D 示意（只读，约 1s 刷新）
+            pose_box = QGroupBox("工具位姿（实时）")
+            pl = QVBoxLayout(pose_box)
+            self.pose_view = RobotPoseView()
+            pl.addWidget(self.pose_view, 1)
+            right = QVBoxLayout()
+            right.addWidget(pose_box, 1)
+            split.addLayout(right, 1)
+
+            lay.addLayout(split, 1)
+            return page
+
+        # ---------------- 相机画面弹窗（DEC-119） ----------------
+        def _ensure_image_popup(self):
+            popup = getattr(self, "_image_popup", None)
+            if popup is None:
+                from application.presentation.components.capture_popup import (
+                    CapturePopup,
+                )
+                popup = CapturePopup(self.image_card, self._image_slot,
+                                     parent=self.window(),
+                                     title="引导定位 · 相机画面与框/圆")
+                popup.finished.connect(self._on_popup_finished)
+                self._image_popup = popup
+            return popup
+
+        def _on_popup_finished(self, *_a) -> None:  # pragma: no cover - Qt
+            self._popup_open = False
+            btn = getattr(self, "btn_popup", None)
+            if btn is not None:
+                btn.blockSignals(True)
+                btn.setChecked(False)
+                btn.blockSignals(False)
+
+        def _toggle_image_popup(self, checked: bool) -> None:  # pragma: no cover - Qt
+            self._ensure_image_popup()
+            if checked:
+                self._image_popup.attach()
+                self._image_popup.show()
+                self._image_popup.raise_()
+                self._popup_open = True
+            else:
+                self._image_popup.close()
+                self._popup_open = False
+
         # ---------------- 数据刷新 ----------------
         def refresh(self) -> None:  # pragma: no cover - Qt
             cfg = self.store.config
@@ -471,6 +631,7 @@ if GUI_REQUIRED:
             self._load_plan()
             self._rebuild_run_radios()
             self._rebuild_guide_detections()
+            self._rebuild_guide_cameras()
             self._refresh_teach()
             self._refresh_status()
 
@@ -515,6 +676,11 @@ if GUI_REQUIRED:
             for c, val in enumerate(wp.pos, start=1):
                 shown = val * 1000.0 if (wp.mode == "movel" and c <= 3) else val
                 self.wp_table.setItem(r, c, QTableWidgetItem(f"{shown:.6g}"))
+            # DEC-156：路点名称（如「螺栓一」），配方「按螺栓直径运动」下拉显示它
+            item = QTableWidgetItem(wp.note or "")
+            item.setToolTip("路点名称/备注（如：螺栓一）。只用于辨识，不参与运动；"
+                            "配方「按螺栓直径运动」的路线下拉会显示该名称。")
+            self.wp_table.setItem(r, 7, item)
 
         def _row_of_combo(self, combo) -> int:  # pragma: no cover - Qt
             for r in range(self.wp_table.rowCount()):
@@ -530,7 +696,8 @@ if GUI_REQUIRED:
         def _sync_row_cells(self, r: int) -> None:  # pragma: no cover - Qt
             """按行的方式启用/停用单元格。
 
-            - 套筒偏移行**只有「y / j2」列(带符号偏移 mm)可填**，其余列置 0 且只读；
+            - 套筒偏移行**前 3 列(dx/dy/dz mm，Bolt 工具系，可正负)可填**，
+              后 3 列置 0 且只读（DEC-139 起 X/Z 也放开）；
             - 工具系偏移行**前 3 列(dx/dy/dz mm)可填**，后 3 列置 0 且只读；
             - 点位行(movel/movej) 6 列全可填。
             """
@@ -546,11 +713,17 @@ if GUI_REQUIRED:
                 if item is None:
                     item = QTableWidgetItem("0")
                     self.wp_table.setItem(r, c, item)
-                if socket and c != 2:               # 套筒偏移：只有 y/j2 列(偏移)保留
+                if socket and c > 3:                # 套筒偏移：后 3 列(姿态)只读
                     item.setText("0")
                     item.setFlags(readonly)
                     item.setToolTip(
-                        f"{_MODE_LABELS[mode]}只用「y / j2」列填偏移(mm)；正=进入/前进，负=脱离/后退")
+                        f"{_MODE_LABELS[mode]}只用前 3 列填 Bolt 工具系 dx/dy/dz(mm，可正负)；"
+                        f"后 3 列须为 0")
+                elif socket:
+                    item.setFlags(editable)
+                    item.setToolTip(
+                        f"{_MODE_LABELS[mode]}：Bolt 工具系 dx/dy/dz(mm，可正负)；"
+                        f"历史用法 Y：+ = 进入/前进，− = 脱离/后退；DEC-139 起 X/Z 也可填")
                 elif tool and c > 3:                # 工具系偏移：只用前 3 列
                     item.setText("0")
                     item.setFlags(readonly)
@@ -578,8 +751,10 @@ if GUI_REQUIRED:
                 if mode == "movel" and c <= 3:
                     v = v / 1000.0          # 界面 mm -> 内部 m
                 vals.append(v)
+            note_item = self.wp_table.item(r, 7)
+            note = note_item.text().strip() if note_item is not None else ""
             try:
-                return Waypoint(mode, tuple(vals))
+                return Waypoint(mode, tuple(vals), note)
             except ValueError as exc:
                 QMessageBox.warning(self, "路点非法", f"第 {r + 1} 行：{exc}")
                 return None
@@ -738,18 +913,22 @@ if GUI_REQUIRED:
                 return
             self.runner.start_plan(pid)
             self._mark_guide_frame_stale()
+            self._refresh_status()
 
         def _pause(self) -> None:  # pragma: no cover - Qt
             if self.runner:
                 self.runner.pause()
+                self._refresh_status()
 
         def _resume(self) -> None:  # pragma: no cover - Qt
             if self.runner:
                 self.runner.resume()
+                self._refresh_status()
 
         def _stop(self) -> None:  # pragma: no cover - Qt
             if self.runner:
                 self.runner.stop()
+                self._refresh_status()
 
         # ---------------- 引导定位：视觉方案 / 框圆（DEC-109） ----------------
         def _detections(self) -> list:
@@ -781,6 +960,41 @@ if GUI_REQUIRED:
                     return det
             return None
 
+        def _rebuild_guide_cameras(self) -> None:  # pragma: no cover - Qt
+            """DEC-137：引导相机下拉 = 本次运行**已连接**的相机通道（默认 DS86）。"""
+            svc = getattr(self.runner, "guidance", None)
+            ids_fn = getattr(svc, "camera_ids", None)
+            ids = list(ids_fn()) if callable(ids_fn) else []
+            if not ids:
+                live = getattr(getattr(self.ctx, "stack", None), "cameras", None)
+                ids = sorted(live) if isinstance(live, dict) else []
+            keep = self.guide_camera.currentData()
+            self.guide_camera.blockSignals(True)
+            try:
+                self.guide_camera.clear()
+                for cid in ids:
+                    self.guide_camera.addItem(str(cid), str(cid))
+                if not ids:
+                    self.guide_camera.addItem("（无可用相机）", None)
+                idx = self.guide_camera.findData(keep) if keep else -1
+                if idx < 0:
+                    idx = self.guide_camera.findData("ds86_01")   # 现场默认 DS86
+                self.guide_camera.setCurrentIndex(idx if idx >= 0 else 0)
+            finally:
+                self.guide_camera.blockSignals(False)
+
+        def _guide_camera_id(self):
+            """当前选中的引导相机 ID；没有可用相机时为 None（用引导服务默认值）。"""
+            data = self.guide_camera.currentData()
+            return str(data) if data else None
+
+        def _on_guide_camera_changed(self) -> None:  # pragma: no cover - Qt
+            """切换引导相机：旧画面属于原相机，不能拿它继续定位（DEC-137）。"""
+            if self._guide_frame is not None:
+                self._reset_guide_frame("已切换引导相机：请重新「单次视觉检测」")
+            elif self._guide_frame_cam:
+                self._guide_frame_cam = ""
+
         def _on_guide_detection_changed(self) -> None:  # pragma: no cover - Qt
             """切换视觉方案：旧画面的框/圆不再代表新方案，清掉避免混用。"""
             self._reset_guide_frame("已切换视觉方案：请重新「单次视觉检测」")
@@ -789,12 +1003,14 @@ if GUI_REQUIRED:
             self._guide_frame = None
             self._guide_frame_valid = False
             self._guide_layout_note = ""
+            self._guide_frame_cam = ""
             try:
                 self.view_result.set_target_mode(None)
                 self.view_result.clear_target_layout()
             except Exception:  # noqa: BLE001
                 pass
             self._set_guide_draw_buttons(False)
+            self.btn_save_img.setEnabled(False)
             if reason:
                 self.guide_status.setText(reason)
 
@@ -826,6 +1042,73 @@ if GUI_REQUIRED:
                 self.view_result.set_target_mode("circle")
             elif self.view_result.target_mode() == "circle":
                 self.view_result.set_target_mode(None)
+
+        def _save_guide_image(self) -> None:  # pragma: no cover - Qt
+            """DEC-121：保存当前引导帧（原始数据，不套显示旋转）。"""
+            from application.presentation.components.frame_export import (
+                save_frame_files,
+            )
+            if self._guide_frame is None:
+                return
+            saved = save_frame_files(self._guide_frame, self,
+                                     title="保存引导图片")
+            if saved:
+                self.guide_status.setText("已保存：" + "；".join(saved))
+
+        def _guard_guide_frame_editable(self) -> bool:
+            """绘制/调整前确认当前帧仍在效（机械臂移动过就要重新检测）。"""
+            if self._guide_frame is not None and self._guide_frame_valid:
+                return True
+            self.guide_status.setText(
+                "画面已过期：请先「单次视觉检测」，再画框/画圆")
+            return False
+
+        def _on_guide_box_requested(self, x1: int, y1: int,
+                                    x2: int, y2: int) -> None:  # pragma: no cover - Qt
+            """画框完成：追加到本地布局；有视觉方案时顺手在框内按该方案找圆。"""
+            if not self._guard_guide_frame_editable():
+                return
+            layout = self.view_result.layout()
+            boxes = [dict(b) for b in layout["boxes"]]
+            box = {"x1": float(x1), "y1": float(y1),
+                   "x2": float(x2), "y2": float(y2), "circle": None}
+            det = self._selected_detection()
+            svc = getattr(self.runner, "guidance", None)
+            if det is not None and svc is not None:
+                try:
+                    circle, note = find_circle_in_rect(
+                        self._guide_frame, getattr(det, "params", None),
+                        getattr(svc, "host_proxy", None), dict(box, idx=0))
+                except Exception as exc:  # noqa: BLE001 - 找圆失败不挡画框
+                    circle, note = None, f"框内找圆异常：{exc}"
+                if circle is not None:
+                    box["circle"] = circle
+            boxes.append(box)
+            self.view_result.set_layout(boxes, len(boxes) - 1)
+            self.view_result.set_target_edit_mode(True)
+            self._on_guide_layout_changed()
+            if det is not None and self._guide_frame is not None:
+                self.guide_status.setText(
+                    f"{self.guide_status.text()}；{note}")
+
+        def _on_guide_circle_drawn(self, idx: int, cx: int, cy: int,
+                                   r: int) -> None:  # pragma: no cover - Qt
+            """画圆完成：写进该框的圆，并刷新偏差显示（只算不下发）。"""
+            if not self._guard_guide_frame_editable():
+                return
+            layout = self.view_result.layout()
+            boxes = [dict(b) for b in layout["boxes"]]
+            if not (0 <= int(idx) < len(boxes)):
+                return
+            boxes[int(idx)]["circle"] = {"cx": float(cx), "cy": float(cy),
+                                         "radius_px": float(r)}
+            self.view_result.set_layout(boxes, int(idx))
+            self.view_result.set_target_edit_mode(True)
+            self._on_guide_layout_changed()
+            svc = getattr(self.runner, "guidance", None)
+            if svc is not None and self._guide_frame is not None:
+                self._guide_offsets_for_circle(
+                    svc, self._guide_frame, boxes[int(idx)]["circle"])
 
         def _on_guide_layout_changed(self) -> None:  # pragma: no cover - Qt
             if self._guide_frame is None:
@@ -862,7 +1145,15 @@ if GUI_REQUIRED:
             """显示帧 + 框/圆布局，并把它作为下次粗/精定位的定位依据。"""
             self._guide_frame = frame
             self._guide_frame_valid = True
+            self._guide_frame_cam = str(getattr(frame, "camera_id", "") or "")
             self._guide_layout_note = str(getattr(layout, "message", "") or "")
+            # DEC-119：DS86 画面按显示旋转 270°（只转显示，坐标仍是原图）；
+            # DEC-137：其它相机（如 D405 USB）按原始朝向显示。
+            try:
+                self.view_result.set_display_rotation(
+                    270 if self._guide_frame_cam.startswith("ds86") else 0)
+            except Exception:  # noqa: BLE001 - 旋转只是显示用途
+                pass
             color = getattr(getattr(frame, "color", None), "data", None)
             if color is not None:
                 self.view_result.show_array(color, kind="color")
@@ -872,6 +1163,7 @@ if GUI_REQUIRED:
             self.view_result.set_layout(getattr(layout, "boxes", []),
                                         getattr(layout, "selected", None))
             self._set_guide_draw_buttons(True)
+            self.btn_save_img.setEnabled(True)
             self._on_guide_layout_changed()
 
         def _guide_offsets_for_circle(self, svc, frame, circle) -> None:
@@ -907,26 +1199,33 @@ if GUI_REQUIRED:
                 QMessageBox.information(self, "视觉检测", "未接入本地引导服务")
                 return
             det = self._selected_detection()
+            cam = self._guide_camera_id()
             frame = None
             if det is not None:
                 cap = getattr(svc, "capture_frame", None)
                 if callable(cap):
                     try:
-                        frame = cap()
+                        try:
+                            frame = cap(camera_id=cam) if cam else cap()
+                        except TypeError:      # 兼容旧假引导服务（无 camera_id 参数）
+                            frame = cap()
                     except Exception as exc:  # noqa: BLE001
                         self.kv_detect.set_key("检测", f"失败：抓图失败: {exc}")
                         self._reset_guide_frame("抓图失败，没有可调整的画面")
                         return
                     if frame is None:
-                        self.kv_detect.set_key("检测", "失败：未取到 DS86 帧")
+                        self.kv_detect.set_key("检测", "失败：未取到相机帧")
                         self._reset_guide_frame("未取到帧，请检查相机")
                         return
                     layout = compute_initial_layout(
                         frame, getattr(det, "params", None),
                         getattr(svc, "host_proxy", None))
                     note = f"视觉方案 {det.detection_id}"
-                    if getattr(det, "camera_ref", "") not in ("", "ds86_01"):
-                        note += f"（该检测记录相机 {det.camera_ref}，本页仍用 DS86 引导相机）"
+                    det_cam = getattr(det, "camera_ref", "") or ""
+                    cur_cam = str(getattr(frame, "camera_id", "") or cam or "")
+                    if det_cam and det_cam != cur_cam:
+                        note += (f"（该检测记录相机 {det_cam}，本页用 "
+                                 f"{cur_cam or '默认引导相机'}）")
                     self._apply_guide_frame(frame, layout)
                     self.kv_detect.set_key(
                         "检测", f"{note}：{layout.message or '已按检测配置现算'}")
@@ -935,7 +1234,10 @@ if GUI_REQUIRED:
                         self._guide_offsets_for_circle(svc, frame, circle)
                     return
             # 未选视觉方案（或旧引导服务没有抓帧接口）：旧的自动检测路径
-            result = svc.detect()
+            try:
+                result = svc.detect(camera_id=cam) if cam else svc.detect()
+            except TypeError:              # 兼容旧假引导服务（无 camera_id 参数）
+                result = svc.detect()
             if not result.ok:
                 self.kv_detect.set_key("检测", f"失败：{result.message}")
                 self._reset_guide_frame("未检出：可换视觉方案或调整检测配置")
@@ -995,13 +1297,20 @@ if GUI_REQUIRED:
                     return
                 # 自动找圆模式：过期画面不用，按引导配置重新抓图找圆（旧行为）。
             self.runner.confirm = self._confirm
+            # DEC-124：手动引导也受单段最大偏移约束（参数配置里的值，默认 50mm）
+            _prof = self.store.config.profile
             self.runner.start_guide(speed=self.guide_speed.value(), stages=(stage,),
+                                    max_offset_mm=float(
+                                        getattr(_prof, "guide_max_offset_mm", 50.0) or 0.0),
+                                    camera_id=self._guide_camera_id(),
                                     override=override)
             self._mark_guide_frame_stale()
+            self._refresh_status()
 
         def _cancel_guide(self) -> None:  # pragma: no cover - Qt
             if self.runner:
                 self.runner.cancel_guide()
+                self._refresh_status()
 
         def _socket(self, sign: int) -> None:  # pragma: no cover - Qt
             if not self._guard_motion("套筒偏移"):
@@ -1009,6 +1318,16 @@ if GUI_REQUIRED:
             mm = sign * abs(self.sock_mm.value())
             self.runner.request_socket_move(mm, axis="Y", speed=self.sock_speed.value())
             self._mark_guide_frame_stale()
+            self._refresh_status()
+
+        def _jog(self, axis: str, sign: int) -> None:  # pragma: no cover - Qt
+            """手动调整页：Bolt 工具系单轴步进（DEC-139）。"""
+            if not self._guard_motion("工具系点动"):
+                return
+            mm = sign * abs(self.jog_step.value())
+            self.runner.request_tool_jog(axis, mm, speed=self.jog_speed.value())
+            self._mark_guide_frame_stale()
+            self._refresh_status()
 
         # ---------------- 门控与确认 ----------------
         def _guard_motion(self, action: str) -> bool:  # pragma: no cover - Qt
@@ -1018,7 +1337,29 @@ if GUI_REQUIRED:
                 return False
             return True
 
-        def _confirm(self, title: str, message: str, options: list[str]) -> str | None:  # pragma: no cover
+        def _confirm(self, title: str, message: str, options: list[str]) -> str | None:  # pragma: no cover - Qt
+            """确认回调（可能来自运动工作线程）：一律在 GUI 线程弹窗并阻塞等待结果。
+
+            工作线程直接建 QMessageBox 会跨线程设父对象而崩溃（DEC-116），
+            所以这里把请求经信号排队到 GUI 线程执行，工作线程只等结果。
+            """
+            if threading.get_ident() == self._gui_thread_ident:
+                return self._confirm_box(title, message, options)
+            holder: dict[str, str | None] = {}
+            done = threading.Event()
+            self._confirm_request.emit(title, message, list(options), holder, done)
+            if not done.wait(1800):          # 30 分钟未处理 = 按未确认处理（不动）
+                return None
+            return holder.get("choice")
+
+        def _confirm_on_gui(self, title: str, message: str, options,
+                            holder: dict, done: threading.Event) -> None:
+            try:
+                holder["choice"] = self._confirm_box(title, message, options)
+            finally:
+                done.set()
+
+        def _confirm_box(self, title: str, message: str, options: list[str]) -> str | None:  # pragma: no cover - Qt
             box = QMessageBox(self)
             box.setWindowTitle(title)
             box.setText(message)
@@ -1040,11 +1381,22 @@ if GUI_REQUIRED:
                 "机器人", f"{'已连接' if connected else '未连接'}"
                           f"（{profile.active_tool} / {profile.active_work}）")
             self.kv_gate.set_key("运动", "real 模式默认允许（无环境变量闸）")
-            can_move = connected
-            for btn in (self.btn_run, self.btn_pause, self.btn_resume,
+            # DEC-157：执行中禁用"会再次下发动作"的按钮（双击/连点防重复下发）；
+            # 暂停/继续按当前状态单独放行。
+            from application.services.motion_runner import (
+                STATE_GUIDE, STATE_PAUSED, STATE_PLAYING,
+            )
+            st = self.runner.state if self.runner is not None else {}
+            mode = st.get("mode")
+            busy = mode in (STATE_PLAYING, STATE_PAUSED, STATE_GUIDE)
+            idle_ok = connected and not busy
+            for btn in (self.btn_run,
                         self.btn_guide_coarse, self.btn_guide_fine,
-                        self.btn_fwd, self.btn_back):
-                btn.setEnabled(can_move)
+                        self.btn_fwd, self.btn_back,
+                        *getattr(self, "jog_buttons", {}).values()):
+                btn.setEnabled(idle_ok)
+            self.btn_pause.setEnabled(connected and mode == STATE_PLAYING)
+            self.btn_resume.setEnabled(connected and mode == STATE_PAUSED)
             self.btn_detect.setEnabled(True)     # 检测不动机械臂，不受运动闸限制
             self.btn_stop.setEnabled(True)      # 停止始终可发（与全局停止一致）
             # 示教点：读取关节是只读操作（不需要运动闸），但必须真实机械臂已连接；
@@ -1064,6 +1416,26 @@ if GUI_REQUIRED:
 
         def _tick(self) -> None:  # pragma: no cover - Qt
             self._drain_state()
+            # DEC-145：手动调整页可见时约 1s 读一次当前位姿刷新示意图（只读）。
+            if getattr(self, "pose_view", None) is not None and self.isVisible() \
+                    and self.tabs.currentIndex() == 2:
+                self._pose_tick = getattr(self, "_pose_tick", 0) + 1
+                if self._pose_tick % 4 == 0:
+                    self._refresh_pose_view()
+
+        def _refresh_pose_view(self) -> None:  # pragma: no cover - Qt
+            """读一次机器人当前位姿并刷新 3D 示意（只读，不动机械臂）。"""
+            view = getattr(self, "pose_view", None)
+            if view is None:
+                return
+            arm = getattr(self.runner, "arm", None)
+            connected = bool(getattr(arm, "connected", False))
+            view.set_connected(connected)
+            if not connected:
+                return
+            pose = self._call_arm("get_current_pose")
+            if pose and len(pose) >= 6:
+                view.set_pose(pose)
 
         def _drain_state(self) -> None:  # pragma: no cover - Qt
             if self.runner is None:
@@ -1084,6 +1456,15 @@ if GUI_REQUIRED:
                 self._timer.stop()
             except Exception:  # noqa: BLE001
                 pass
+            popup = getattr(self, "_image_popup", None)
+            if popup is not None:
+                try:
+                    popup.close()
+                    popup.deleteLater()
+                except Exception:  # noqa: BLE001
+                    pass
+                self._image_popup = None
+                self._popup_open = False
 
 else:  # pragma: no cover
     class MotionPage:  # type: ignore[no-redef]

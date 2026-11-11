@@ -20,7 +20,7 @@ import pytest
 
 pytest.importorskip("PySide6")
 
-from PySide6.QtCore import QEvent, QPointF, Qt  # noqa: E402
+from PySide6.QtCore import QEvent, QPoint, QPointF, Qt  # noqa: E402
 from PySide6.QtGui import QKeyEvent, QMouseEvent  # noqa: E402
 
 from application.presentation.components.annot_image_view import AnnotImageView  # noqa: E402
@@ -293,3 +293,32 @@ def test_circle_edit_disabled_does_not_capture_click(iv):
     _move(iv, 180, 130, buttons=Qt.MouseButton.LeftButton)
     _release(iv, 180, 130, Qt.MouseButton.LeftButton)
     assert got == []
+
+
+# ---------------------------------------------------------------- DEC-132 旋转后滚轮缩放
+def test_wheel_zoom_still_works_after_display_rotation(iv):
+    """显示旋转 270° 时滚轮仍能放大/缩小（此前 m11 因旋转变 0，缩放被误判越界而不动）。"""
+    from PySide6.QtGui import QWheelEvent
+
+    def scale(view):
+        t = view.view.transform()
+        return (t.m11() ** 2 + t.m12() ** 2) ** 0.5
+
+    iv.set_display_rotation(270)
+    base = scale(iv)
+    assert base > 0
+    ev = QWheelEvent(QPointF(200, 150), QPointF(200, 150),
+                     QPoint(0, 0), QPoint(0, 120),
+                     Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+                     Qt.ScrollPhase.NoScrollPhase, False)
+    iv.eventFilter(iv.view.viewport(), ev)
+    up = scale(iv)
+    assert up > base * 1.1, (base, up)
+    assert iv._user_zoomed is True
+
+    down = QWheelEvent(QPointF(200, 150), QPointF(200, 150),
+                       QPoint(0, 0), QPoint(0, -120),
+                       Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+                       Qt.ScrollPhase.NoScrollPhase, False)
+    iv.eventFilter(iv.view.viewport(), down)
+    assert scale(iv) < up

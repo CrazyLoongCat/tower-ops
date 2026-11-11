@@ -321,6 +321,7 @@ def check_linux_specs() -> None:
     check("edge_service" in a.excludes,
           "Linux 主程序 excludes 应挡住 edge_service")
     for mod in ("cv2", "numpy", "PySide6.QtWidgets", "onnxruntime",
+                "pyrealsense2", "pyrealsense2.pyrealsense2", "application.adapters.realsense_usb",
                 "application.hosts.circle38.opencv_backend",
                 # DEC-076：厂家 SDK 以 data/外部目录进包、不被分析，其模块级 import 的
                 # 模块必须登记（Linux 冻结包曾报 No module named 'ctypes.util'）

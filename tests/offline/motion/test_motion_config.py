@@ -25,6 +25,7 @@ from application.services.motion_config import (
     Waypoint,
     is_socket_mode,
     is_tool_offset_mode,
+    socket_offset_mm,
     socket_signed_mm,
     tool_offset_mm,
     validate,
@@ -62,11 +63,13 @@ def test_waypoint_rejects_unknown_mode_and_non_finite():
 # ---------------------------------------------------------------- 套筒偏移路点
 def test_socket_waypoint_mode_and_signed_mm():
     for mode in SOCKET_MODES:
-        wp = Waypoint(mode, (0, 12, 0, 0, 0, 0))       # 偏移(mm) 记在 Y 分量
+        wp = Waypoint(mode, (0, 12, 0, 0, 0, 0))       # 历史用法：偏移(mm) 记在 Y 分量
         assert is_socket_mode(wp.mode) is True
     # 方向 = Y 分量的正负号：+ = 进入/前进(Y+)，− = 脱离/后退(Y−)。
     assert socket_signed_mm(Waypoint("socket_offset", (0, 12, 0, 0, 0, 0))) == 12.0
     assert socket_signed_mm(Waypoint("socket_offset", (0, -12, 0, 0, 0, 0))) == -12.0
+    # DEC-139：X/Z 也放开——三轴分量都是 Bolt 工具系 mm（可正负）。
+    assert socket_offset_mm(Waypoint("socket_offset", (5, -12, 2, 0, 0, 0))) == (5.0, -12.0, 2.0)
     assert is_socket_mode("movel") is False
     # 旧的四方式名已并入单一方式：不再是合法路点方式。
     for legacy in ("socket_fwd", "socket_back", "socket_enter", "socket_exit"):
@@ -81,7 +84,11 @@ def test_validate_socket_waypoint_rules():
 
     assert _issues("socket_offset", (0, 10, 0, 0, 0, 0)) == []
     assert _issues("socket_offset", (0, -10, 0, 0, 0, 0)) == []       # 负向合法
-    assert any("只应填 Y 分量" in s for s in _issues("socket_offset", (5, 10, 0, 0, 0, 0)))
+    # DEC-139：X/Z 也放开，三轴可组合。
+    assert _issues("socket_offset", (5, 10, 0, 0, 0, 0)) == []
+    assert _issues("socket_offset", (-5, 10, -2, 0, 0, 0)) == []
+    # 姿态分量必须为 0；三轴全 0 视为无动作。
+    assert any("只用前 3 项" in s for s in _issues("socket_offset", (0, 10, 0, 1, 0, 0)))
     assert any("偏移为 0" in s for s in _issues("socket_offset", (0, 0, 0, 0, 0, 0)))
     # 点位行(movel)不受套筒规则约束。
     assert _issues("movel", (1, 2, 3, 0, 0, 0)) == []
@@ -234,13 +241,46 @@ def test_import_legacy_motion_shapes():
     assert cfg.plans[0].waypoints[1].mode == "movej"
     assert cfg.plans[1].waypoints[0].mode == "movej"     # 纯列表按方案默认方式包装
     assert cfg.profile.active_tool == "Bolt" and cfg.profile.speed_cap == 50
-    assert cfg.profile.global_speed == 35
+    # DEC-138：旧工程的 global_speed / safety 等未接线字段导入时忽略
+    assert not hasattr(cfg.profile, "global_speed")
+    assert not hasattr(cfg.profile, "safety")
     assert cfg.sockets[0].size == "M10"
     assert all(p.source == LEGACY_SOURCE for p in cfg.plans)
     assert validate(cfg) == []
 
 
 # ---------------------------------------------------------------- 仓库那份
+def test_unused_profile_keys_are_ignored_and_dropped_on_save(tmp_path):
+    """DEC-138：旧 motion.yaml 里的 global_speed / safety / guide_move_blend 等
+    未接线字段加载时忽略、保存时不再写回；用到的字段照常读取。"""
+    p = tmp_path / "m.yaml"
+    p.write_text(
+        "schema_version: 1\n"
+        "profile:\n"
+        "  speed_cap: 40\n"
+        "  guide_move_speed: 12\n"
+        "  guide_move_blend: 5\n"
+        "  global_speed: 35\n"
+        "  safety:\n"
+        "    collision: true\n"
+        "  insert:\n"
+        "    creep_speed: 2.0\n"
+        "  tighten:\n"
+        "    hold_force_z: 15.0\n",
+        encoding="utf-8")
+    st = MotionConfigStore(str(p), seed_if_missing=False)
+    cfg = st.load()
+    assert cfg.profile.speed_cap == 40
+    assert cfg.profile.guide_move_speed == 12
+    for gone in ("guide_move_blend", "global_speed", "safety", "insert", "tighten"):
+        assert not hasattr(cfg.profile, gone)
+    st.save()
+    text = p.read_text(encoding="utf-8")
+    for gone in ("guide_move_blend", "global_speed", "safety", "insert", "tighten"):
+        assert gone not in text
+    assert "speed_cap: 40" in text
+
+
 def test_shipped_motion_config_loads_and_validates():
     """仓库 configs/motion/motion.yaml 必须能加载、无校验问题、带来源标注。"""
     path = ROOT / "configs" / "motion" / "motion.yaml"
@@ -269,12 +309,38 @@ def test_shipped_motion_config_matches_legacy_source():
     assert {p.plan_id for p in imported} == set(legacy_plans)
     for plan in imported:
         src = legacy_plans[plan.plan_id]
+        legacy_wps = src.get("waypoints") or []
+        if len(plan.waypoints) != len(legacy_wps):
+            # motion.yaml 是用户活配置：用户可能在界面里给导入方案增删过路点。
+            # 被改过的方案无法逐点比对，跳过（不改用户配置、也不误报导入回归）。
+            continue
         assert plan.speed == int(src.get("speed", 20))
         assert plan.blend == int(src.get("blend", 12))
-        legacy_wps = src.get("waypoints") or []
-        assert len(plan.waypoints) == len(legacy_wps)
         for got, raw in zip(plan.waypoints, legacy_wps):
             pos = raw["pos"] if isinstance(raw, dict) else raw
             assert got.pos == tuple(float(x) for x in pos)
             if isinstance(raw, dict):
                 assert got.mode == raw.get("mode", src.get("mode", "movel"))
+
+
+def test_waypoint_note_roundtrip(tmp_path):
+    """DEC-156：路点名称（如「螺栓一」）随方案存盘/载入/克隆保留；空名不落盘。"""
+    from application.services.motion_config import Waypoint
+
+    path = str(tmp_path / "motion.yaml")
+    store = MotionConfigStore(path, seed_if_missing=False)
+    store.load()
+    store.add_plan(MotionPlan(plan_id="p", waypoints=[
+        Waypoint("movej", (1, 2, 3, 4, 5, 6), "螺栓二"),
+        Waypoint("movel", (0.1, 0.2, 0.3, 0.0, 0.0, 0.0)),
+    ]))
+    store.save()
+
+    again = MotionConfigStore(path, seed_if_missing=False)
+    again.load()
+    plan = again.config.find_plan("p")
+    assert plan.waypoints[0].note == "螺栓二"
+    assert plan.waypoints[1].note == ""
+    assert plan.clone().waypoints[0].note == "螺栓二"
+    text = open(path, encoding="utf-8").read()
+    assert "螺栓二" in text
